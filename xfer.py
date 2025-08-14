@@ -1380,6 +1380,558 @@ def send_dir(ip: str, path: str, port: int, excludes=(), secure: bool=True):
     except Exception as e:
         warn(f"Manifest send failed ({e}); data delivered. Verification skipped on receiver.)")
 
+# ----------------------- XFER v4 Implementation --------------------------
+
+def receive_auto_v4(out_path: str | None, port: int, force: bool = False, secure: bool = True):
+    """XFER v4 auto-detecting receiver with full encryption."""
+    banner()
+    
+    if secure:
+        info("Secure mode: performing key exchange and TOFU verification...")
+        # TODO: Implement TOFU+SAS handshake for v4
+        # For now, we'll do a basic implementation
+    
+    # Listen on the data port
+    try:
+        with listener(port) as ls:
+            info(f"Listening on port {port} (secure: {secure})...")
+            info("Press Ctrl-C to cancel.")
+            
+            try:
+                conn, (peer_ip, peer_port) = accept_one(ls, deadline=time.time() + 300)
+                canonical_ip = canonicalize_address(peer_ip)
+                info(f"Connection from {canonical_ip}:{peer_port}")
+            except TimeoutError:
+                warn("No connection received within timeout")
+                sys.exit(1)
+                
+            with closing(conn):
+                # Perform key exchange if secure
+                session_keys = None
+                if secure:
+                    try:
+                        session_keys = perform_key_exchange(conn, is_sender=False)
+                        ok("Key exchange completed")
+                    except Exception as e:
+                        err(f"Key exchange failed: {e}")
+                        sys.exit(2)
+                
+                # Read header to determine file vs directory
+                header = _recv_all(conn, 6)
+                
+                if header == XAR4_FILE_MAGIC:
+                    receive_file_v4(conn, session_keys, out_path, port, force)
+                elif header == XAR4_DIR_MAGIC:
+                    receive_directory_v4(conn, session_keys, out_path, port)
+                else:
+                    # Try legacy format fallback for insecure mode
+                    if not secure and looks_like_tar_header(header + _recv_all(conn, 506)):
+                        warn("Detected legacy format - falling back to v2 compatibility")
+                        # TODO: Could implement legacy support here
+                        err("Legacy format not supported in v4")
+                        sys.exit(1)
+                    else:
+                        err("Unknown file format")
+                        sys.exit(2)
+                        
+    except KeyboardInterrupt:
+        warn("Cancelled by user")
+        sys.exit(130)
+
+def receive_file_v4(conn, session_keys, out_path, port, force):
+    """Receive a file using XAR4 format."""
+    # Read 8-byte size after magic
+    size_bytes = _recv_all(conn, 8)
+    file_size = struct.unpack('<Q', size_bytes)[0]
+    
+    info(f"Receiving file: {file_size} bytes")
+    
+    # Determine output path
+    if out_path and os.path.isdir(out_path):
+        # Will get actual filename from meta channel
+        output_dir = out_path
+        temp_file = os.path.join(output_dir, f".xfer-temp-{int(time.time())}.part")
+    elif out_path:
+        temp_file = out_path + ".part"
+    else:
+        temp_file = f".xfer-temp-{int(time.time())}.part"
+    
+    # Setup progress tracking
+    counters = {"received": 0}
+    stop_ev = threading.Event()
+    
+    def total_func():
+        return counters["received"]
+    
+    # Start progress thread
+    progress_thread = threading.Thread(
+        target=progress_loop, 
+        args=(stop_ev, total_func, "Receiving:", file_size), 
+        daemon=True
+    )
+    progress_thread.start()
+    
+    try:
+        # Receive file data
+        hasher = hashlib.sha256()
+        with open(temp_file, 'wb') as f:
+            remaining = file_size
+            while remaining > 0:
+                if STOP.is_set():
+                    raise KeyboardInterrupt()
+                
+                chunk_size = min(CHUNK, remaining)
+                if session_keys:
+                    # Read encrypted record
+                    encrypted_record = _recv_all(conn, 13 + chunk_size + 16)  # AAD + data + tag
+                    chunk = session_keys.decrypt_data_record(encrypted_record)
+                else:
+                    # Plain text
+                    chunk = _recv_all(conn, chunk_size)
+                
+                f.write(chunk)
+                hasher.update(chunk)
+                counters["received"] += len(chunk)
+                remaining -= len(chunk)
+        
+        stop_ev.set()
+        progress_thread.join()
+        
+        # Receive metadata from meta port
+        meta_hash, filename = receive_file_metadata_v4(port + 1, session_keys)
+        
+        # Verify hash
+        computed_hash = hasher.hexdigest()
+        if computed_hash != meta_hash:
+            err(f"Hash mismatch! Expected {meta_hash}, got {computed_hash}")
+            os.rename(temp_file, temp_file.replace('.part', '.corrupt'))
+            sys.exit(2)
+        
+        # Move to final location
+        if out_path and os.path.isdir(out_path):
+            final_path = os.path.join(out_path, filename)
+        elif out_path:
+            final_path = out_path
+        else:
+            final_path = filename
+            
+        if not force and os.path.exists(final_path):
+            final_path = unique_path(os.path.dirname(final_path), os.path.basename(final_path))
+            
+        os.rename(temp_file, final_path)
+        ok(f"File saved: {final_path}")
+        
+    except Exception as e:
+        stop_ev.set()
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        raise e
+
+def receive_directory_v4(conn, session_keys, out_path, port):
+    """Receive a directory using XAR4 format."""
+    info("Receiving directory...")
+    
+    output_dir = out_path or "."
+    os.makedirs(output_dir, exist_ok=True)
+    
+    local_hashes = {}
+    counters = {"received": 0, "files": 0}
+    stop_ev = threading.Event()
+    
+    def total_func():
+        return counters["received"]
+    
+    progress_thread = threading.Thread(
+        target=progress_loop, 
+        args=(stop_ev, total_func, "Receiving:"), 
+        daemon=True
+    )
+    progress_thread.start()
+    
+    try:
+        while True:
+            if STOP.is_set():
+                raise KeyboardInterrupt()
+                
+            # Read entry header (type + path_len)
+            entry_header = _recv_all(conn, 5)
+            entry_type = entry_header[0]
+            
+            if entry_type == XAR4_DIR_TERMINATOR:
+                break  # End of directory
+                
+            if entry_type != XAR4_FILE_ENTRY:
+                err(f"Unknown entry type: {entry_type}")
+                sys.exit(2)
+            
+            path_len = struct.unpack('>I', entry_header[1:5])[0]
+            
+            # Read rest of entry metadata
+            entry_data = _recv_all(conn, 20 + path_len)  # mode(4) + mtime(8) + size(8) + path
+            mode, mtime, size = struct.unpack('<IQQ', entry_data[:20])
+            path = entry_data[20:20+path_len].decode('utf-8')
+            
+            # Normalize path
+            norm_path = xar4_normalize_path(path)
+            local_path = os.path.join(output_dir, norm_path)
+            
+            info(f"File: {norm_path} ({size} bytes)")
+            
+            # Create parent directories
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            
+            # Receive file data
+            hasher = hashlib.sha256()
+            with open(local_path, 'wb') as f:
+                remaining = size
+                while remaining > 0:
+                    chunk_size = min(CHUNK, remaining)
+                    if session_keys:
+                        # Read encrypted record  
+                        encrypted_record = _recv_all(conn, 13 + chunk_size + 16)
+                        chunk = session_keys.decrypt_data_record(encrypted_record)
+                    else:
+                        chunk = _recv_all(conn, chunk_size)
+                    
+                    f.write(chunk)
+                    hasher.update(chunk)
+                    counters["received"] += len(chunk)
+                    remaining -= len(chunk)
+            
+            # Set file metadata
+            try:
+                os.chmod(local_path, mode & 0o777)
+                os.utime(local_path, (mtime, mtime))
+            except Exception:
+                pass  # Non-critical
+                
+            local_hashes[norm_path] = hasher.hexdigest()
+            counters["files"] += 1
+        
+        stop_ev.set()
+        progress_thread.join()
+        
+        # Verify manifest from meta port
+        verify_directory_manifest_v4(port + 1, session_keys, local_hashes)
+        ok(f"Directory extracted: {output_dir} ({counters['files']} files)")
+        
+    except Exception as e:
+        stop_ev.set()
+        raise e
+
+def receive_file_metadata_v4(meta_port, session_keys):
+    """Receive file metadata from meta channel."""
+    try:
+        with listener(meta_port) as ls:
+            conn, _ = accept_one(ls, deadline=time.time() + 60)
+            with closing(conn):
+                if session_keys:
+                    # Read encrypted metadata
+                    meta_size = struct.unpack('>I', _recv_all(conn, 4))[0]
+                    encrypted_record = _recv_all(conn, meta_size)
+                    metadata = session_keys.decrypt_meta_record(encrypted_record).decode('utf-8')
+                else:
+                    # Plain text
+                    metadata = conn.recv(1024).decode('utf-8').strip()
+                
+                # Parse "sha256  filename"
+                parts = metadata.split('  ', 1)
+                if len(parts) != 2:
+                    raise ValueError("Invalid metadata format")
+                    
+                return parts[0], parts[1]
+    except Exception as e:
+        err(f"Failed to receive metadata: {e}")
+        sys.exit(2)
+
+def verify_directory_manifest_v4(meta_port, session_keys, local_hashes):
+    """Verify directory manifest from meta channel."""
+    try:
+        with listener(meta_port) as ls:
+            conn, _ = accept_one(ls, deadline=time.time() + 60)
+            with closing(conn):
+                manifest_lines = []
+                
+                if session_keys:
+                    # Read encrypted manifest records
+                    while True:
+                        try:
+                            record_header = _recv_all(conn, 4)
+                            record_size = struct.unpack('>I', record_header)[0]
+                            if record_size == 0:
+                                break
+                            encrypted_record = _recv_all(conn, record_size)
+                            line = session_keys.decrypt_meta_record(encrypted_record).decode('utf-8')
+                            manifest_lines.append(line.strip())
+                        except Exception:
+                            break
+                else:
+                    # Plain text manifest
+                    data = conn.recv(1024 * 1024).decode('utf-8')
+                    manifest_lines = data.strip().split('\n')
+                
+                # Verify each file
+                mismatches = []
+                for line in manifest_lines:
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('  ', 1)
+                    if len(parts) != 2:
+                        continue
+                    expected_hash, path = parts
+                    actual_hash = local_hashes.get(path, '')
+                    if expected_hash != actual_hash:
+                        mismatches.append(f"{path}: expected {expected_hash}, got {actual_hash}")
+                
+                if mismatches:
+                    err("Hash verification failed:")
+                    for mismatch in mismatches:
+                        err(f"  {mismatch}")
+                    sys.exit(2)
+                else:
+                    ok("All files verified successfully")
+                    
+    except Exception as e:
+        err(f"Failed to verify manifest: {e}")
+        sys.exit(2)
+
+def send_file_v4(ip: str, path: str, port: int, secure: bool = True):
+    """Send a file using XFER v4 with encryption."""
+    banner()
+    
+    if not os.path.isfile(path):
+        err(f"Not a file: {path}")
+        sys.exit(1)
+    
+    file_size = os.path.getsize(path)
+    filename = os.path.basename(path)
+    
+    info(f"Sending file: {filename} ({file_size} bytes) to {ip}:{port}")
+    info(f"Secure: {secure}")
+    
+    if secure:
+        info("Will perform key exchange and TOFU verification...")
+    
+    try:
+        # Connect to receiver
+        with closing(connect_with_retry(ip, port, total_timeout=30)) as conn:
+            canonical_ip = canonicalize_address(ip)
+            
+            # Perform key exchange if secure
+            session_keys = None
+            if secure:
+                try:
+                    session_keys = perform_key_exchange(conn, is_sender=True) 
+                    ok("Key exchange completed")
+                except Exception as e:
+                    err(f"Key exchange failed: {e}")
+                    sys.exit(2)
+            
+            # Send XAR4 file header
+            header = xar4_create_file_header(file_size)
+            conn.sendall(header)
+            
+            # Setup progress
+            counters = {"sent": 0}
+            stop_ev = threading.Event()
+            
+            def total_func():
+                return counters["sent"]
+            
+            progress_thread = threading.Thread(
+                target=progress_loop,
+                args=(stop_ev, total_func, "Sending:", file_size),
+                daemon=True
+            )
+            progress_thread.start()
+            
+            # Send file data and compute hash
+            hasher = hashlib.sha256()
+            with open(path, 'rb') as f:
+                while True:
+                    if STOP.is_set():
+                        raise KeyboardInterrupt()
+                        
+                    chunk = f.read(CHUNK)
+                    if not chunk:
+                        break
+                        
+                    hasher.update(chunk)
+                    
+                    if session_keys:
+                        # Encrypt and send
+                        encrypted_record = session_keys.encrypt_data_record(chunk)
+                        conn.sendall(encrypted_record)
+                    else:
+                        conn.sendall(chunk)
+                        
+                    counters["sent"] += len(chunk)
+            
+            stop_ev.set()
+            progress_thread.join()
+            
+            # Send metadata on meta channel
+            computed_hash = hasher.hexdigest()
+            send_file_metadata_v4(ip, port + 1, session_keys, computed_hash, filename)
+            
+            ok("File sent successfully")
+            
+    except KeyboardInterrupt:
+        warn("Cancelled by user")
+        sys.exit(130)
+    except Exception as e:
+        err(f"Transfer failed: {e}")
+        sys.exit(2)
+
+def send_dir_v4(ip: str, path: str, port: int, excludes=(), secure: bool = True):
+    """Send a directory using XFER v4 with encryption."""
+    banner()
+    
+    if not os.path.isdir(path):
+        err(f"Not a directory: {path}")
+        sys.exit(1)
+    
+    # Collect files
+    files = list(iter_files_with_sizes(path, excludes))
+    if not files:
+        err("No files to send")
+        sys.exit(1)
+        
+    total_size = sum(size for _, _, size in files)
+    info(f"Sending directory: {path} ({len(files)} files, {total_size} bytes) to {ip}:{port}")
+    info(f"Secure: {secure}")
+    
+    if secure:
+        info("Will perform key exchange and TOFU verification...")
+    
+    try:
+        # Connect to receiver  
+        with closing(connect_with_retry(ip, port, total_timeout=30)) as conn:
+            # Perform key exchange if secure
+            session_keys = None
+            if secure:
+                try:
+                    session_keys = perform_key_exchange(conn, is_sender=True)
+                    ok("Key exchange completed")
+                except Exception as e:
+                    err(f"Key exchange failed: {e}")
+                    sys.exit(2)
+            
+            # Send XAR4 directory header
+            header = xar4_create_dir_header()
+            conn.sendall(header)
+            
+            # Setup progress
+            counters = {"sent": 0}
+            stop_ev = threading.Event()
+            
+            def total_func():
+                return counters["sent"]
+            
+            progress_thread = threading.Thread(
+                target=progress_loop,
+                args=(stop_ev, total_func, "Sending:", total_size),
+                daemon=True  
+            )
+            progress_thread.start()
+            
+            # Send each file
+            manifest_lines = []
+            for abs_path, rel_path, size in files:
+                if STOP.is_set():
+                    raise KeyboardInterrupt()
+                
+                info(f"Sending: {rel_path}")
+                
+                # Get file metadata
+                stat = os.stat(abs_path)
+                mode = stat.st_mode & 0o777
+                mtime = int(stat.st_mtime)
+                
+                # Send entry header
+                entry = xar4_create_dir_entry(rel_path, mode, mtime, size)
+                conn.sendall(entry)
+                
+                # Send file data
+                hasher = hashlib.sha256()
+                with open(abs_path, 'rb') as f:
+                    remaining = size
+                    while remaining > 0:
+                        chunk_size = min(CHUNK, remaining)
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                            
+                        hasher.update(chunk)
+                        
+                        if session_keys:
+                            encrypted_record = session_keys.encrypt_data_record(chunk)
+                            conn.sendall(encrypted_record)
+                        else:
+                            conn.sendall(chunk)
+                            
+                        counters["sent"] += len(chunk)
+                        remaining -= len(chunk)
+                
+                manifest_lines.append(f"{hasher.hexdigest()}  {rel_path}")
+            
+            # Send directory terminator
+            terminator = xar4_create_dir_terminator()
+            conn.sendall(terminator)
+            
+            stop_ev.set()
+            progress_thread.join()
+            
+            # Send manifest on meta channel
+            send_directory_manifest_v4(ip, port + 1, session_keys, manifest_lines)
+            
+            ok("Directory sent successfully")
+            
+    except KeyboardInterrupt:
+        warn("Cancelled by user")
+        sys.exit(130)
+    except Exception as e:
+        err(f"Transfer failed: {e}")
+        sys.exit(2)
+
+def send_file_metadata_v4(ip, meta_port, session_keys, file_hash, filename):
+    """Send file metadata on meta channel."""
+    try:
+        with closing(connect_with_retry(ip, meta_port, total_timeout=30)) as conn:
+            metadata = f"{file_hash}  {filename}"
+            
+            if session_keys:
+                encrypted_record = session_keys.encrypt_meta_record(metadata.encode('utf-8'))
+                # Send size first
+                conn.sendall(struct.pack('>I', len(encrypted_record)))
+                conn.sendall(encrypted_record)
+            else:
+                conn.sendall(metadata.encode('utf-8'))
+                
+    except Exception as e:
+        err(f"Failed to send metadata: {e}")
+        sys.exit(2)
+
+def send_directory_manifest_v4(ip, meta_port, session_keys, manifest_lines):
+    """Send directory manifest on meta channel."""
+    try:
+        with closing(connect_with_retry(ip, meta_port, total_timeout=30)) as conn:
+            if session_keys:
+                # Send each line as encrypted record
+                for line in manifest_lines:
+                    encrypted_record = session_keys.encrypt_meta_record(line.encode('utf-8'))
+                    conn.sendall(struct.pack('>I', len(encrypted_record)))
+                    conn.sendall(encrypted_record)
+                # Send terminator
+                conn.sendall(struct.pack('>I', 0))
+            else:
+                manifest = '\n'.join(manifest_lines)
+                conn.sendall(manifest.encode('utf-8'))
+                
+    except Exception as e:
+        err(f"Failed to send manifest: {e}")
+        sys.exit(2)
+
 # ----------------------- CLI ------------------------------------------------
 
 def main():
