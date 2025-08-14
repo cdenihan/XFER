@@ -76,20 +76,21 @@ import hmac
 import os
 import signal
 import socket
+import struct
 import sys
 import tarfile
 import tempfile
 import threading
 import time
 from contextlib import closing, contextmanager
-from ipaddress import ip_address, IPv4Address
+from ipaddress import ip_address, IPv4Address, IPv6Address
 from pathlib import Path, PurePosixPath
 
 # ----------------------- Branding & Color ----------------------------------
 
 APP_NAME = "XFER"
 APP_TAGLINE = "eXpress File & dir transfER"
-VERSION = "2.1.0"  # secure-by-default TOFU+SAS
+VERSION = "4.0.0"  # Full encryption with ChaCha20-Poly1305 and FFDHE-2048
 
 def _enable_win_ansi():
     """Enable ANSI colors on Windows consoles that support VT sequences; no-op elsewhere."""
@@ -121,7 +122,7 @@ def err(msg):   sys.stderr.write(f"{CLR['err']}[ERR ]{CLR['reset']} {msg}\n")
 # ----------------------- Tunables ------------------------------------------
 
 DEFAULT_PORT = 9000
-CHUNK = 1024 * 1024                 # 1 MiB socket chunks (good for GbE)
+CHUNK = 4 * 1024 * 1024              # 4 MiB socket chunks for XFER v4
 CONNECT_ATTEMPT_TIMEOUT = 3.0
 CONNECT_TOTAL_TIMEOUT  = 30.0
 ACCEPT_POLL_SECS       = 1.0
@@ -136,12 +137,398 @@ XFER_HOME              = Path.home() / ".xfer"
 IDENTITY_PATH          = XFER_HOME / "identity.key"     # receiver identity secret (32 bytes)
 KNOWN_PEERS_PATH       = XFER_HOME / "known_peers"      # lines: "ip:port fphex"
 
+# XAR4 Wire Format Constants
+XAR4_FILE_MAGIC = b"X4FIL\0"       # File mode magic (6 bytes)
+XAR4_DIR_MAGIC = b"X4DIR\0"        # Directory mode magic (6 bytes)
+XAR4_FILE_ENTRY = ord('F')         # File entry type
+XAR4_DIR_TERMINATOR = ord('Z')     # Directory terminator
+
+# FFDHE-2048 parameters (RFC 7919)
+FFDHE_2048_P = int("FFFFFFFFFFFFFFFFADF85458A2BB4A9AAFDC5620273D3CF1"
+                   "D8B9C583CE2D3695A9E13641146433FBCC939DCE249B3EF9"
+                   "7D2FE363630C75D8F681B202AEC4617AD3DF1ED5D5FD6561"
+                   "2433F51F5F066ED0856365553DED1AF3B557135E7F57C935"
+                   "984F0C70E0E68B77E2A689DAF3EFE8721DF158A136ADE735"
+                   "30ACCA4F483A797ABC0AB182B324FB61D108A94BB2C8E3FB"
+                   "B96ADAB760D7F4681D4F42A3DE394DF4AE56EDE76372BB19"
+                   "0B07A7C8EE0A6D709E02FCE1CDF7E2ECC03404CD28342F61"
+                   "9172FE9CE98583FF8E4F1232EEF28183C3FE3B1B4C6FAD73"
+                   "3BB5FCBC2EC22005C58EF1837D1683B2C6F34A26C1B2EFFA"
+                   "886B423861285C97FFFFFFFFFFFFFFFF", 16)
+FFDHE_2048_G = 2
+
 # Global stop flag (cooperative cancellation)
 STOP = threading.Event()
 def _signal_stop(_s, _f): STOP.set()
 signal.signal(signal.SIGINT, _signal_stop)
 try: signal.signal(signal.SIGTERM, _signal_stop)
 except Exception: pass
+
+# ----------------------- Cryptographic Implementations --------------------
+
+def _rotate_left(n: int, b: int, width: int = 32) -> int:
+    """Rotate n left by b bits within width-bit word."""
+    mask = (1 << width) - 1
+    n &= mask
+    return ((n << b) | (n >> (width - b))) & mask
+
+def _quarter_round(a: int, b: int, c: int, d: int) -> tuple[int, int, int, int]:
+    """ChaCha20 quarter round."""
+    a = (a + b) & 0xFFFFFFFF
+    d ^= a
+    d = _rotate_left(d, 16)
+    
+    c = (c + d) & 0xFFFFFFFF
+    b ^= c
+    b = _rotate_left(b, 12)
+    
+    a = (a + b) & 0xFFFFFFFF
+    d ^= a
+    d = _rotate_left(d, 8)
+    
+    c = (c + d) & 0xFFFFFFFF
+    b ^= c
+    b = _rotate_left(b, 7)
+    
+    return a, b, c, d
+
+def _chacha20_block(key: bytes, counter: int, nonce: bytes) -> bytes:
+    """Generate a ChaCha20 block."""
+    if len(key) != 32 or len(nonce) != 12:
+        raise ValueError("Invalid key or nonce length")
+    
+    # Constants
+    state = [
+        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,  # "expand 32-byte k"
+        *struct.unpack('<8I', key),  # Key (8 words)
+        counter & 0xFFFFFFFF,        # Counter
+        *struct.unpack('<3I', nonce) # Nonce (3 words)
+    ]
+    
+    working_state = state[:]
+    
+    # 20 rounds (10 double rounds)
+    for _ in range(10):
+        # Column rounds
+        working_state[0], working_state[4], working_state[8], working_state[12] = \
+            _quarter_round(working_state[0], working_state[4], working_state[8], working_state[12])
+        working_state[1], working_state[5], working_state[9], working_state[13] = \
+            _quarter_round(working_state[1], working_state[5], working_state[9], working_state[13])
+        working_state[2], working_state[6], working_state[10], working_state[14] = \
+            _quarter_round(working_state[2], working_state[6], working_state[10], working_state[14])
+        working_state[3], working_state[7], working_state[11], working_state[15] = \
+            _quarter_round(working_state[3], working_state[7], working_state[11], working_state[15])
+        
+        # Diagonal rounds
+        working_state[0], working_state[5], working_state[10], working_state[15] = \
+            _quarter_round(working_state[0], working_state[5], working_state[10], working_state[15])
+        working_state[1], working_state[6], working_state[11], working_state[12] = \
+            _quarter_round(working_state[1], working_state[6], working_state[11], working_state[12])
+        working_state[2], working_state[7], working_state[8], working_state[13] = \
+            _quarter_round(working_state[2], working_state[7], working_state[8], working_state[13])
+        working_state[3], working_state[4], working_state[9], working_state[14] = \
+            _quarter_round(working_state[3], working_state[4], working_state[9], working_state[14])
+    
+    # Add original state
+    for i in range(16):
+        working_state[i] = (working_state[i] + state[i]) & 0xFFFFFFFF
+    
+    return struct.pack('<16I', *working_state)
+
+def _poly1305_mac(key: bytes, data: bytes) -> bytes:
+    """Compute Poly1305 MAC."""
+    if len(key) != 32:
+        raise ValueError("Poly1305 key must be 32 bytes")
+    
+    r = struct.unpack('<4I', key[:16])
+    s = struct.unpack('<4I', key[16:])
+    
+    # Clamp r
+    r = [r[0] & 0x0fffffff, r[1] & 0x0ffffffc, r[2] & 0x0ffffffc, r[3] & 0x0ffffffc]
+    
+    # Initialize accumulator
+    h = [0, 0, 0, 0, 0]
+    
+    # Process data in 16-byte blocks
+    for i in range(0, len(data), 16):
+        block = data[i:i+16]
+        if len(block) < 16:
+            block = block + b'\x00' * (16 - len(block))
+        
+        n = list(struct.unpack('<4I', block))
+        
+        if len(data[i:i+16]) < 16:
+            # Pad partial block
+            n.append(1 << (len(data[i:i+16]) * 8))
+        else:
+            n.append(1)
+        
+        # Add block to accumulator
+        for j in range(5):
+            h[j] += n[j]
+        
+        # Multiply by r
+        d = [0] * 10
+        for j in range(5):
+            for k in range(4):
+                d[j + k] += h[j] * r[k]
+        
+        # Reduce modulo 2^130 - 5
+        carry = 0
+        for j in range(10):
+            d[j] += carry
+            if j < 5:
+                carry = d[j] >> 32
+                d[j] &= 0xffffffff
+            else:
+                carry = d[j] >> 32
+                d[j - 5] += (d[j] & 0xffffffff) * 5
+                d[j] = 0
+        
+        h = d[:5]
+        
+        # Final carry propagation
+        for j in range(4):
+            h[j+1] += h[j] >> 32
+            h[j] &= 0xffffffff
+    
+    # Add s
+    carry = 0
+    for i in range(4):
+        carry += h[i] + s[i]
+        h[i] = carry & 0xffffffff
+        carry >>= 32
+    
+    return struct.pack('<4I', *h[:4])
+
+def chacha20_poly1305_encrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes = b'') -> bytes:
+    """ChaCha20-Poly1305 AEAD encryption."""
+    if len(key) != 32 or len(nonce) != 12:
+        raise ValueError("Invalid key or nonce length")
+    
+    # Generate Poly1305 key
+    poly_key = _chacha20_block(key, 0, nonce)[:32]
+    
+    # Encrypt data
+    encrypted = bytearray()
+    for i, block_start in enumerate(range(0, len(data), 64)):
+        block = data[block_start:block_start + 64]
+        keystream = _chacha20_block(key, i + 1, nonce)[:len(block)]
+        encrypted.extend(bytes(a ^ b for a, b in zip(block, keystream)))
+    
+    # Compute MAC
+    mac_data = aad + b'\0' * ((16 - len(aad)) % 16)
+    mac_data += encrypted + b'\0' * ((16 - len(encrypted)) % 16)
+    mac_data += struct.pack('<Q', len(aad)) + struct.pack('<Q', len(encrypted))
+    
+    tag = _poly1305_mac(poly_key, mac_data)
+    
+    return bytes(encrypted) + tag
+
+def chacha20_poly1305_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes = b'') -> bytes:
+    """ChaCha20-Poly1305 AEAD decryption."""
+    if len(key) != 32 or len(nonce) != 12:
+        raise ValueError("Invalid key or nonce length")
+    
+    if len(ciphertext) < 16:
+        raise ValueError("Ciphertext too short")
+    
+    encrypted = ciphertext[:-16]
+    tag = ciphertext[-16:]
+    
+    # Generate Poly1305 key and verify MAC
+    poly_key = _chacha20_block(key, 0, nonce)[:32]
+    
+    mac_data = aad + b'\0' * ((16 - len(aad)) % 16)
+    mac_data += encrypted + b'\0' * ((16 - len(encrypted)) % 16)
+    mac_data += struct.pack('<Q', len(aad)) + struct.pack('<Q', len(encrypted))
+    
+    expected_tag = _poly1305_mac(poly_key, mac_data)
+    
+    if not hmac.compare_digest(tag, expected_tag):
+        raise ValueError("Authentication tag verification failed")
+    
+    # Decrypt data
+    decrypted = bytearray()
+    for i, block_start in enumerate(range(0, len(encrypted), 64)):
+        block = encrypted[block_start:block_start + 64]
+        keystream = _chacha20_block(key, i + 1, nonce)[:len(block)]
+        decrypted.extend(bytes(a ^ b for a, b in zip(block, keystream)))
+    
+    return bytes(decrypted)
+
+def hkdf_expand(prk: bytes, length: int, info: bytes = b'') -> bytes:
+    """HKDF Expand (RFC 5869)."""
+    hash_len = 32  # SHA-256
+    if length > 255 * hash_len:
+        raise ValueError("Length too large for HKDF")
+    
+    okm = b''
+    t = b''
+    counter = 1
+    
+    while len(okm) < length:
+        t = hmac.new(prk, t + info + bytes([counter]), hashlib.sha256).digest()
+        okm += t
+        counter += 1
+    
+    return okm[:length]
+
+def hkdf_extract_expand(ikm: bytes, length: int, salt: bytes = b'', info: bytes = b'') -> bytes:
+    """HKDF Extract and Expand in one step."""
+    if not salt:
+        salt = b'\x00' * 32  # SHA-256 hash length
+    
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    return hkdf_expand(prk, length, info)
+
+def ffdhe_2048_generate_keypair() -> tuple[int, int]:
+    """Generate FFDHE-2048 key pair. Returns (private_key, public_key)."""
+    # Generate random private key (1 < private < p-1)
+    while True:
+        private = int.from_bytes(os.urandom(256), 'big')  # 2048 bits
+        if 1 < private < FFDHE_2048_P - 1:
+            break
+    
+    public = pow(FFDHE_2048_G, private, FFDHE_2048_P)
+    return private, public
+
+def ffdhe_2048_compute_shared(private_key: int, peer_public_key: int) -> bytes:
+    """Compute FFDHE-2048 shared secret."""
+    if not (1 < peer_public_key < FFDHE_2048_P - 1):
+        raise ValueError("Invalid peer public key")
+    
+    shared_secret = pow(peer_public_key, private_key, FFDHE_2048_P)
+    # Convert to bytes (big-endian, 256 bytes)
+    return shared_secret.to_bytes(256, 'big')
+
+def canonicalize_address(addr: str) -> str:
+    """Canonicalize IPv4/IPv6 address (collapse IPv4-mapped IPv6 to IPv4)."""
+    try:
+        ip = ip_address(addr)
+        if isinstance(ip, IPv6Address) and ip.ipv4_mapped:
+            return str(ip.ipv4_mapped)
+        return str(ip)
+    except Exception:
+        return addr
+
+# ----------------------- Session Management & Record Framing ---------------
+
+class SessionKeys:
+    """Manages symmetric keys derived from DH shared secret."""
+    
+    def __init__(self, shared_secret: bytes, is_sender: bool):
+        self.is_sender = is_sender
+        # Derive keys using HKDF
+        self.data_send_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-data-send")
+        self.data_recv_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-data-recv")
+        self.meta_send_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-meta-send")
+        self.meta_recv_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-meta-recv")
+        
+        # Sequence counters
+        self.data_send_seq = 0
+        self.data_recv_seq = 0
+        self.meta_send_seq = 0
+        self.meta_recv_seq = 0
+    
+    def encrypt_data_record(self, data: bytes) -> bytes:
+        """Encrypt data channel record."""
+        key = self.data_send_key
+        nonce = self._derive_nonce("data-send", self.data_send_seq)
+        aad = struct.pack('>BIQ', 1, len(data), self.data_send_seq)  # type=1, length, seq
+        
+        encrypted = chacha20_poly1305_encrypt(key, nonce, data, aad)
+        self.data_send_seq += 1
+        
+        return aad + encrypted
+    
+    def decrypt_data_record(self, record: bytes) -> bytes:
+        """Decrypt data channel record."""
+        if len(record) < 13 + 16:  # AAD + minimum ciphertext
+            raise ValueError("Record too short")
+        
+        aad = record[:13]
+        encrypted = record[13:]
+        
+        # Parse AAD
+        record_type, length, seq = struct.unpack('>BIQ', aad)
+        if record_type != 1:
+            raise ValueError("Invalid record type for data channel")
+        if seq != self.data_recv_seq:
+            raise ValueError(f"Sequence number mismatch: expected {self.data_recv_seq}, got {seq}")
+        
+        key = self.data_recv_key
+        nonce = self._derive_nonce("data-recv", seq)
+        
+        decrypted = chacha20_poly1305_decrypt(key, nonce, encrypted, aad)
+        if len(decrypted) != length:
+            raise ValueError("Decrypted length mismatch")
+        
+        self.data_recv_seq += 1
+        return decrypted
+    
+    def encrypt_meta_record(self, data: bytes) -> bytes:
+        """Encrypt meta channel record."""
+        key = self.meta_send_key
+        nonce = self._derive_nonce("meta-send", self.meta_send_seq)
+        aad = struct.pack('>BIQ', 2, len(data), self.meta_send_seq)  # type=2, length, seq
+        
+        encrypted = chacha20_poly1305_encrypt(key, nonce, data, aad)
+        self.meta_send_seq += 1
+        
+        return aad + encrypted
+    
+    def decrypt_meta_record(self, record: bytes) -> bytes:
+        """Decrypt meta channel record."""
+        if len(record) < 13 + 16:  # AAD + minimum ciphertext
+            raise ValueError("Record too short")
+        
+        aad = record[:13]
+        encrypted = record[13:]
+        
+        # Parse AAD
+        record_type, length, seq = struct.unpack('>BIQ', aad)
+        if record_type != 2:
+            raise ValueError("Invalid record type for meta channel")
+        if seq != self.meta_recv_seq:
+            raise ValueError(f"Sequence number mismatch: expected {self.meta_recv_seq}, got {seq}")
+        
+        key = self.meta_recv_key
+        nonce = self._derive_nonce("meta-recv", seq)
+        
+        decrypted = chacha20_poly1305_decrypt(key, nonce, encrypted, aad)
+        if len(decrypted) != length:
+            raise ValueError("Decrypted length mismatch")
+        
+        self.meta_recv_seq += 1
+        return decrypted
+    
+    def _derive_nonce(self, label: str, seq: int) -> bytes:
+        """Derive nonce from label and sequence number."""
+        return hashlib.sha256(label.encode() + struct.pack('>Q', seq)).digest()[:12]
+
+def perform_key_exchange(sock, is_sender: bool) -> SessionKeys:
+    """Perform ephemeral FFDHE-2048 key exchange."""
+    # Generate our key pair
+    private_key, public_key = ffdhe_2048_generate_keypair()
+    
+    # Serialize our public key (256 bytes, big-endian)
+    our_public_bytes = public_key.to_bytes(256, 'big')
+    
+    if is_sender:
+        # Sender: send our public key, then receive peer's
+        sock.sendall(our_public_bytes)
+        peer_public_bytes = _recv_all(sock, 256)
+    else:
+        # Receiver: receive peer's public key, then send ours
+        peer_public_bytes = _recv_all(sock, 256)
+        sock.sendall(our_public_bytes)
+    
+    # Compute shared secret
+    peer_public_key = int.from_bytes(peer_public_bytes, 'big')
+    shared_secret = ffdhe_2048_compute_shared(private_key, peer_public_key)
+    
+    return SessionKeys(shared_secret, is_sender)
 
 # ----------------------- Utilities -----------------------------------------
 
@@ -152,6 +539,21 @@ def is_private_ipv4(s: str) -> bool:
         return isinstance(ip, IPv4Address) and (ip.is_private or ip.is_link_local)
     except Exception:
         return False
+
+def _recv_all(sock, n: int) -> bytes:
+    """Receive exactly n bytes from socket."""
+    data = bytearray()
+    while len(data) < n:
+        if STOP.is_set():
+            raise KeyboardInterrupt()
+        try:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                raise ConnectionError("Peer closed connection")
+            data.extend(chunk)
+        except socket.timeout:
+            continue
+    return bytes(data)
 
 def local_ips():
     """Best-effort list of local IPv4s; includes primary egress IP. Always returns at least 127.0.0.1."""
@@ -172,6 +574,29 @@ def local_ips():
     except Exception:
         pass
     if not ips: ips.add("127.0.0.1")
+    return sorted(ips)
+
+def local_ipv6_addresses():
+    """Best-effort list of local IPv6 addresses."""
+    ips = set()
+    try:
+        hn = socket.gethostname()
+        for fam, _, _, _, sa in socket.getaddrinfo(hn, None):
+            if fam == socket.AF_INET6:
+                ip = sa[0]
+                try:
+                    addr = ip_address(ip)
+                    # Skip loopback and link-local, include private/unique local
+                    if not addr.is_loopback and not addr.is_link_local:
+                        ips.add(str(addr))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    
+    # Add IPv6 loopback if no other addresses found
+    if not ips: 
+        ips.add("::1")
     return sorted(ips)
 
 def human(n: float) -> str:
@@ -232,6 +657,78 @@ def unique_path(dirpath: str, filename: str) -> str:
 def ensure_parent(path: str):
     """Create parent directory for 'path' if missing."""
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+
+# ----------------------- XAR4 Wire Format ----------------------------------
+
+def xar4_create_file_header(size: int) -> bytes:
+    """Create XAR4 file header: magic + 8-byte little-endian size."""
+    return XAR4_FILE_MAGIC + struct.pack('<Q', size)
+
+def xar4_parse_file_header(header: bytes) -> int:
+    """Parse XAR4 file header, return size."""
+    if len(header) < 14 or header[:6] != XAR4_FILE_MAGIC:
+        raise ValueError("Invalid XAR4 file header")
+    return struct.unpack('<Q', header[6:14])[0]
+
+def xar4_create_dir_header() -> bytes:
+    """Create XAR4 directory header: magic only."""
+    return XAR4_DIR_MAGIC
+
+def xar4_parse_dir_header(header: bytes) -> bool:
+    """Parse XAR4 directory header, return True if valid."""
+    return len(header) >= 6 and header[:6] == XAR4_DIR_MAGIC
+
+def xar4_create_dir_entry(path: str, mode: int, mtime: int, size: int) -> bytes:
+    """Create XAR4 directory entry: type 'F' + path_len(4BE) + mode(4LE) + mtime(8LE) + size(8LE) + UTF-8 path."""
+    path_bytes = path.encode('utf-8')
+    entry = struct.pack('>BI', XAR4_FILE_ENTRY, len(path_bytes))
+    entry += struct.pack('<IQQ', mode, mtime, size)
+    entry += path_bytes
+    return entry
+
+def xar4_parse_dir_entry(data: bytes, offset: int) -> tuple[str, int, int, int, int]:
+    """Parse XAR4 directory entry. Returns (path, mode, mtime, size, next_offset)."""
+    if offset + 21 > len(data):
+        raise ValueError("Insufficient data for directory entry")
+    
+    entry_type = data[offset]
+    if entry_type == XAR4_DIR_TERMINATOR:
+        return None, 0, 0, 0, offset + 1  # End marker
+    
+    if entry_type != XAR4_FILE_ENTRY:
+        raise ValueError(f"Invalid entry type: {entry_type}")
+    
+    path_len = struct.unpack('>I', data[offset+1:offset+5])[0]
+    mode, mtime, size = struct.unpack('<IQQ', data[offset+5:offset+25])
+    
+    if offset + 25 + path_len > len(data):
+        raise ValueError("Insufficient data for path")
+    
+    path = data[offset+25:offset+25+path_len].decode('utf-8')
+    
+    return path, mode, mtime, size, offset + 25 + path_len
+
+def xar4_create_dir_terminator() -> bytes:
+    """Create XAR4 directory terminator."""
+    return bytes([XAR4_DIR_TERMINATOR])
+
+def xar4_normalize_path(path: str) -> str:
+    """Normalize and sanitize path to prevent traversal attacks."""
+    # Convert to POSIX format and normalize
+    path = str(PurePosixPath(path))
+    
+    # Remove leading slashes and resolve relative components
+    parts = []
+    for part in path.split('/'):
+        if part in ('', '.'):
+            continue
+        elif part == '..':
+            if parts:
+                parts.pop()
+        else:
+            parts.append(part)
+    
+    return '/'.join(parts) if parts else 'unnamed'
 
 # ----------------------- Progress (pv-style) --------------------------------
 
@@ -887,43 +1384,98 @@ def send_dir(ip: str, path: str, port: int, excludes=(), secure: bool=True):
 
 def main():
     """
-    Subcommands:
-      - ip         : list local IPv4s
-      - receive    : auto-detect file vs directory and receive appropriately (secure by default)
-      - recv-file  : file-only receiver (secure by default; helpful guidance if mismatch)
-      - recv-dir   : dir-only receiver (secure by default; helpful guidance if mismatch)
-      - send       : send file or directory (secure by default)
+    XFER v4 CLI - Secure file transfer with ChaCha20-Poly1305 encryption.
+    Commands:
+      - ip                     : list local IPv4/IPv6 addresses
+      - receive [options]      : auto-detect and receive file or directory
+      - send <IP> <PATH> [opts]: send file or directory with encryption
     """
     parser = argparse.ArgumentParser(
         prog="xfer.py",
         description=(
-            f"{APP_NAME} — {APP_TAGLINE}\n"
-            "Secure-by-default TOFU+SAS pairing on control port (N-1). On first pairing both sides\n"
-            "show the same 10-digit code; press ENTER to trust. Authentication only; no encryption.\n\n"
-            "Pairings:\n"
-            "  send <FILE>      ↔  receive (auto)  or  recv-file <OUTPUT>\n"
-            "  send <DIRECTORY> ↔  receive (auto)  or  recv-dir  <OUTPUT_DIR>\n"
-            "Tip: use --exclude to skip heavy trees like .git/"
+            f"{APP_NAME} v4 — {APP_TAGLINE}\n"
+            "Secure by default: ephemeral Diffie-Hellman key agreement, TOFU identity pinning,\n"
+            "Short Authentication String (SAS) comparison on first pairing.\n"
+            "Encryption: ChaCha20-Poly1305 AEAD, keys derived via HKDF, group FFDHE-2048.\n\n"
+            "Commands:\n"
+            "  ip                        - show local IPv4/IPv6 addresses\n"
+            "  receive [--out PATH]      - listen and receive file or directory\n"
+            "  send <IP> <PATH>          - send file or directory with encryption\n\n"
+            "Use --insecure on both sides to disable encryption for legacy compatibility."
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("-v", "--version", action="version", version=f"{APP_NAME} {VERSION}",
+    parser.add_argument("-v", "--version", action="version", version=f"{APP_NAME} v{VERSION}",
                         help="Show version and exit.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("ip", help="Show local IPv4 addresses (best-effort).")
+    # ip command
+    sub.add_parser("ip", help="Show local IPv4/IPv6 addresses.")
 
-    # receive (auto)
-    p_rcv = sub.add_subparser = sub.add_parser("receive", help="Auto-detect file vs directory and handle appropriately.")
-    p_rcv.add_argument("--out", help="File path or directory. Default: '.' for dirs; sender's filename for files in '.'.")
+    # receive command
+    p_rcv = sub.add_parser("receive", help="Auto-detect file vs directory and handle appropriately.")
+    p_rcv.add_argument("--out", help="Output path. Default: current directory for dirs, sender's filename for files.")
     p_rcv.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Data port (default {DEFAULT_PORT}).")
-    p_rcv.add_argument("--force", action="store_true", help="Allow overwriting existing files (FILE mode).")
-    p_rcv.add_argument("--insecure", "--no-secure", dest="no_secure", action="store_true",
-                       help="Disable TOFU+SAS (control port). Use on both sides for legacy/automation.")
+    p_rcv.add_argument("--force", action="store_true", help="Allow overwriting existing files.")
+    p_rcv.add_argument("--insecure", action="store_true", help="Disable encryption (both sides must use this).")
 
-    # recv-file (enforced mode)
-    p_rf = sub.add_parser("recv-file", help="Receive a single file (enforced mode).")
-    p_rf.add_argument("output", help="File path or existing directory.")
+    # send command
+    p_snd = sub.add_parser("send", help="Send a file or directory.")
+    p_snd.add_argument("ip", help="Receiver IPv4 or IPv6 address.")
+    p_snd.add_argument("path", help="File or directory path to send.")
+    p_snd.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Data port (default {DEFAULT_PORT}).")
+    p_snd.add_argument("--exclude", action="append", metavar="PATTERN", 
+                       help="Exclude files matching pattern (fnmatch style). Can be repeated.")
+    p_snd.add_argument("--exclude-from", metavar="FILE",
+                       help="Read exclusion patterns from file (one per line, # for comments).")
+    p_snd.add_argument("--insecure", action="store_true", help="Disable encryption (both sides must use this).")
+
+    args = parser.parse_args()
+
+    if args.cmd == "ip":
+        banner()
+        # Show both IPv4 and IPv6 addresses
+        sys.stderr.write(f"{CLR['dim']}Local addresses:{CLR['reset']}\n")
+        ipv4_addrs = local_ips()
+        ipv6_addrs = local_ipv6_addresses()
+        
+        for i, ip in enumerate(ipv4_addrs, 1):
+            sys.stderr.write(f"  {i}. {ip}\n")
+        for i, ip in enumerate(ipv6_addrs, len(ipv4_addrs) + 1):
+            sys.stderr.write(f"  {i}. [{ip}]\n")
+        
+        sys.stderr.write(f"\n{CLR['gray']}XFER v4 = secure file transfer with ChaCha20-Poly1305 encryption.{CLR['reset']}\n")
+        return
+
+    if args.cmd == "receive":
+        receive_auto_v4(args.out, args.port, force=args.force, secure=not args.insecure)
+        return
+
+    if args.cmd == "send":
+        # Prepare exclusions
+        excludes = args.exclude or []
+        if args.exclude_from:
+            try:
+                with open(args.exclude_from, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            excludes.append(line)
+            except Exception as e:
+                err(f"Failed to read exclusions file: {e}")
+                sys.exit(1)
+        
+        if not os.path.exists(args.path):
+            err(f"Path not found: {args.path}")
+            sys.exit(1)
+        
+        if os.path.isfile(args.path):
+            send_file_v4(args.ip, args.path, args.port, secure=not args.insecure)
+        elif os.path.isdir(args.path):
+            send_dir_v4(args.ip, args.path, args.port, excludes=excludes, secure=not args.insecure)
+        else:
+            err(f"Not a regular file or directory: {args.path}")
+            sys.exit(1)
     p_rf.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Data port (default {DEFAULT_PORT}).")
     p_rf.add_argument("--force", action="store_true", help="Allow overwriting existing file.")
     p_rf.add_argument("--insecure", "--no-secure", dest="no_secure", action="store_true",
