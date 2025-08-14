@@ -419,11 +419,11 @@ class SessionKeys:
     
     def __init__(self, shared_secret: bytes, is_sender: bool):
         self.is_sender = is_sender
-        # Derive keys using HKDF
-        self.data_send_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-data-send")
-        self.data_recv_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-data-recv")
-        self.meta_send_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-meta-send")
-        self.meta_recv_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-meta-recv")
+        # Derive keys using HKDF - all parties derive the same keys, use based on role
+        self.sender_data_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-sender-data")
+        self.receiver_data_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-receiver-data") 
+        self.sender_meta_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-sender-meta")
+        self.receiver_meta_key = hkdf_extract_expand(shared_secret, 32, info=b"XFER-v4-receiver-meta")
         
         # Sequence counters
         self.data_send_seq = 0
@@ -433,8 +433,9 @@ class SessionKeys:
     
     def encrypt_data_record(self, data: bytes) -> bytes:
         """Encrypt data channel record."""
-        key = self.data_send_key
-        nonce = self._derive_nonce("data-send", self.data_send_seq)
+        # Sender uses sender_data_key, receiver uses receiver_data_key  
+        key = self.sender_data_key if self.is_sender else self.receiver_data_key
+        nonce = self._derive_nonce("data", self.data_send_seq)  # Same label for send/recv
         aad = struct.pack('>BIQ', 1, len(data), self.data_send_seq)  # type=1, length, seq
         
         encrypted = chacha20_poly1305_encrypt(key, nonce, data, aad)
@@ -457,8 +458,9 @@ class SessionKeys:
         if seq != self.data_recv_seq:
             raise ValueError(f"Sequence number mismatch: expected {self.data_recv_seq}, got {seq}")
         
-        key = self.data_recv_key
-        nonce = self._derive_nonce("data-recv", seq)
+        # Receiver uses sender_data_key to decrypt sender's messages, sender uses receiver_data_key to decrypt receiver's messages  
+        key = self.sender_data_key if not self.is_sender else self.receiver_data_key
+        nonce = self._derive_nonce("data", seq)  # Same label for send/recv
         
         decrypted = chacha20_poly1305_decrypt(key, nonce, encrypted, aad)
         if len(decrypted) != length:
@@ -469,8 +471,8 @@ class SessionKeys:
     
     def encrypt_meta_record(self, data: bytes) -> bytes:
         """Encrypt meta channel record."""
-        key = self.meta_send_key
-        nonce = self._derive_nonce("meta-send", self.meta_send_seq)
+        key = self.sender_meta_key if self.is_sender else self.receiver_meta_key
+        nonce = self._derive_nonce("meta", self.meta_send_seq)  # Same label for send/recv
         aad = struct.pack('>BIQ', 2, len(data), self.meta_send_seq)  # type=2, length, seq
         
         encrypted = chacha20_poly1305_encrypt(key, nonce, data, aad)
@@ -493,8 +495,8 @@ class SessionKeys:
         if seq != self.meta_recv_seq:
             raise ValueError(f"Sequence number mismatch: expected {self.meta_recv_seq}, got {seq}")
         
-        key = self.meta_recv_key
-        nonce = self._derive_nonce("meta-recv", seq)
+        key = self.sender_meta_key if not self.is_sender else self.receiver_meta_key
+        nonce = self._derive_nonce("meta", seq)  # Same label for send/recv
         
         decrypted = chacha20_poly1305_decrypt(key, nonce, encrypted, aad)
         if len(decrypted) != length:
@@ -1997,7 +1999,6 @@ def main():
             sys.stderr.write(f"  {i}. [{ip}]\n")
         
         sys.stderr.write(f"\n{CLR['gray']}XFER v4 = secure file transfer with ChaCha20-Poly1305 encryption.{CLR['reset']}\n")
-        return
 
     if args.cmd == "receive":
         receive_auto_v4(args.out, args.port, force=args.force, secure=not args.insecure)
@@ -2028,56 +2029,6 @@ def main():
         else:
             err(f"Not a regular file or directory: {args.path}")
             sys.exit(1)
-    p_rf.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Data port (default {DEFAULT_PORT}).")
-    p_rf.add_argument("--force", action="store_true", help="Allow overwriting existing file.")
-    p_rf.add_argument("--insecure", "--no-secure", dest="no_secure", action="store_true",
-                      help="Disable TOFU+SAS (control port). Use on both sides for legacy/automation.")
-
-    # recv-dir (enforced mode)
-    p_rd = sub.add_parser("recv-dir", help="Receive a directory (streaming tar; enforced mode).")
-    p_rd.add_argument("output_dir", help="Destination directory to extract into.")
-    p_rd.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Data port (default {DEFAULT_PORT}).")
-    p_rd.add_argument("--insecure", "--no-secure", dest="no_secure", action="store_true",
-                      help="Disable TOFU+SAS (control port). Use on both sides for legacy/automation.")
-
-    # send
-    p_s = sub.add_parser("send", help="Send a file or a directory (auto-detect).")
-    p_s.add_argument("receiver_ip", help="Receiver IP address (same LAN recommended).")
-    p_s.add_argument("path", help="Path to a regular file or a directory to send.")
-    p_s.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Receiver data port (default {DEFAULT_PORT}).")
-    p_s.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
-                     help="Exclude by fnmatch; can repeat (e.g., --exclude '.git/*' --exclude '*.pyc').")
-    p_s.add_argument("--insecure", "--no-secure", dest="no_secure", action="store_true",
-                     help="Disable TOFU+SAS (control port). Use on both sides for legacy/automation.")
-
-    args = parser.parse_args()
-
-    if args.cmd == "ip":
-        banner()
-        sys.stderr.write(f"{CLR['dim']}Local IPv4 addresses:{CLR['reset']}\n")
-        for i, ip in enumerate(local_ips(), 1):
-            sys.stderr.write(f"  {i}. {ip}\n")
-        sys.stderr.write(f"\n{CLR['gray']}XFER = industry shorthand for “transfer”.{CLR['reset']}\n")
-        return
-
-    if args.cmd == "receive":
-        receive_auto(args.out, args.port, force=args.force, expected=None, secure=not args.no_secure); return
-
-    if args.cmd == "recv-file":
-        receive_auto(args.output, args.port, force=args.force, expected="file", secure=not args.no_secure); return
-
-    if args.cmd == "recv-dir":
-        receive_auto(args.output_dir, args.port, force=False, expected="dir", secure=not args.no_secure); return
-
-    if args.cmd == "send":
-        if not os.path.exists(args.path):
-            err(f"Path not found: {args.path}"); sys.exit(1)
-        if os.path.isfile(args.path):
-            send_file(args.receiver_ip, args.path, args.port, secure=not args.no_secure)
-        elif os.path.isdir(args.path):
-            send_dir(args.receiver_ip, args.path, args.port, excludes=args.exclude or [], secure=not args.no_secure)
-        else:
-            err(f"Not a regular file or directory: {args.path}"); sys.exit(1)
 
 if __name__ == "__main__":
     try:
