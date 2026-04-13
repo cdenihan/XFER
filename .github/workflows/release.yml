@@ -30,10 +30,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             bin: xfer
             artifact: xfer-linux-aarch64-musl
-          - os: macos-13
-            target: x86_64-apple-darwin
-            bin: xfer
-            artifact: xfer-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             bin: xfer
