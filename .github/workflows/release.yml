@@ -53,7 +53,7 @@ jobs:
             cp "$SRC" "$DST"
             DST_HASH="$(sha256sum "$DST" | awk '{print $1}')"
             if [ "$SRC_HASH" != "$DST_HASH" ]; then
-              echo "Artifact hash mismatch persists after rewrite-copy."
+              echo "Artifact hash mismatch persists after retry."
               exit 1
             fi
           fi
