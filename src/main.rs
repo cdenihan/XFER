@@ -3,16 +3,16 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit as AeadKeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use clap::{Parser, Subcommand};
 use glob::Pattern;
-use hmac::{Hmac, Mac};
 use hmac::digest::KeyInit as HmacKeyInit;
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tar::{Archive, Builder, Header};
@@ -271,7 +271,8 @@ fn sas_from(fp_hex: &str, ns_hex: &str, nr_hex: &str) -> Result<String, String> 
     msg.extend_from_slice(&nr);
     msg.extend_from_slice(b"XFER-SAS1");
 
-    let mut mac = <HmacSha256 as HmacKeyInit>::new_from_slice(&key).map_err(|e| format!("hmac: {e}"))?;
+    let mut mac =
+        <HmacSha256 as HmacKeyInit>::new_from_slice(&key).map_err(|e| format!("hmac: {e}"))?;
     mac.update(&msg);
     let out = mac.finalize().into_bytes();
     let mut nbuf = [0u8; 8];
@@ -285,7 +286,9 @@ fn prompt_trust(prompt: &str) -> Result<bool, String> {
     print!("{prompt}");
     io::stdout().flush().map_err(|e| e.to_string())?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input).map_err(|e| e.to_string())?;
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| e.to_string())?;
     let v = input.trim().to_ascii_lowercase();
     Ok(v.is_empty() || v == "y" || v == "yes")
 }
@@ -294,7 +297,9 @@ fn prompt_override(prompt: &str) -> Result<bool, String> {
     print!("{prompt}");
     io::stdout().flush().map_err(|e| e.to_string())?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input).map_err(|e| e.to_string())?;
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| e.to_string())?;
     Ok(input.trim().eq_ignore_ascii_case("override"))
 }
 
@@ -313,7 +318,11 @@ fn read_headers(conn: &mut TcpStream, max_bytes: usize) -> Result<HashMap<String
                     break;
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -479,23 +488,63 @@ fn human_bytes_per_sec(v: f64) -> String {
     format!("{n:.2} {}", units[idx])
 }
 
+fn human_bytes(v: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut n = v as f64;
+    let mut idx = 0usize;
+    while n >= 1024.0 && idx + 1 < units.len() {
+        n /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{} {}", v, units[idx])
+    } else {
+        format!("{n:.2} {}", units[idx])
+    }
+}
+
+fn eta_string(done: u64, total: u64, speed_bps: f64) -> String {
+    if total <= done || speed_bps <= 0.0 {
+        return "--:--".to_string();
+    }
+    let secs = ((total - done) as f64 / speed_bps).ceil() as u64;
+    let m = secs / 60;
+    let s = secs % 60;
+    if m >= 60 {
+        let h = m / 60;
+        let mm = m % 60;
+        format!("{h:02}:{mm:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
 fn render_progress(prefix: &str, snap: ProgressSnapshot, speed_bps: f64) -> String {
     let overall_pct = progress_pct(snap.sent_bytes, snap.total_bytes);
     let file_pct = progress_pct(snap.file_sent_bytes, snap.file_total_bytes);
     let overall_bar = bar(snap.sent_bytes, snap.total_bytes);
     let file_bar = bar(snap.file_sent_bytes, snap.file_total_bytes);
+    let eta = eta_string(snap.sent_bytes, snap.total_bytes, speed_bps);
     format!(
-        "\r[{prefix}] overall [{overall_bar}] {:>6.2}% ({}/{}) | file [{file_bar}] {:>6.2}% ({}/{}) | files {}/{} | {}",
+        "\r[{prefix}] overall [{overall_bar}] {:>6.2}% {} / {} | file [{file_bar}] {:>6.2}% | files {}/{} | {} | ETA {}",
         overall_pct,
-        snap.sent_bytes,
-        snap.total_bytes,
+        human_bytes(snap.sent_bytes),
+        human_bytes(snap.total_bytes),
         file_pct,
-        snap.file_sent_bytes,
-        snap.file_total_bytes,
         snap.files_done,
         snap.files_total,
         human_bytes_per_sec(speed_bps),
+        eta,
     )
+}
+
+fn read_retry<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
 }
 
 fn parse_status_line(line: &str) -> Option<ProgressSnapshot> {
@@ -547,7 +596,8 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
     let p = status_port(port)?;
     Some(std::thread::spawn(move || {
         let Ok(l) = listener(p) else { return };
-        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180))) else {
+        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180)))
+        else {
             return;
         };
         let mut reader = BufReader::new(stream);
@@ -561,8 +611,6 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
                     let msg = line.trim();
                     if !msg.is_empty() {
                         if msg == "done=1" {
-                            println!();
-                            println!("[STATUS] transfer status stream complete.");
                             break;
                         }
                         if let Some(snap) = parse_status_line(msg) {
@@ -638,11 +686,15 @@ fn spawn_local_progress(
     })
 }
 
-fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+fn spawn_heartbeat_receiver(
+    port: u16,
+    done: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
     let p = heartbeat_port(port)?;
     Some(std::thread::spawn(move || {
         let Ok(l) = listener(p) else { return };
-        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180))) else {
+        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180)))
+        else {
             return;
         };
         println!("[INFO] Heartbeat channel connected on port {p}.");
@@ -659,6 +711,7 @@ fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thr
                         break;
                     }
                 }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => {
                     if last_seen.elapsed() > Duration::from_secs(10) {
                         println!("[WARN] heartbeat timeout on port {p}");
@@ -671,7 +724,11 @@ fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thr
     }))
 }
 
-fn spawn_heartbeat_sender(ip: String, port: u16, done: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+fn spawn_heartbeat_sender(
+    ip: String,
+    port: u16,
+    done: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
     let p = heartbeat_port(port)?;
     Some(std::thread::spawn(move || {
         let Ok(mut stream) = connect_with_retry(&ip, p, Duration::from_secs(30)) else {
@@ -792,7 +849,10 @@ fn sas_sender_handshake(ip: &str, port: u16) -> Result<Session, String> {
 
     write_headers(
         &mut conn,
-        &[("NS", ns_hex.clone()), ("SPUB", hex::encode(sender_pub.as_bytes()))],
+        &[
+            ("NS", ns_hex.clone()),
+            ("SPUB", hex::encode(sender_pub.as_bytes())),
+        ],
     )?;
 
     let sas = sas_from(&fp_hex, &ns_hex, &nr_hex)?;
@@ -974,7 +1034,7 @@ impl<R: Read> HashingReader<R> {
 
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
+        let n = read_retry(&mut self.inner, buf)?;
         if n > 0 {
             self.hasher.update(&buf[..n]);
         }
@@ -1039,7 +1099,11 @@ fn read_preface(stream: &mut TcpStream) -> Result<(String, String), String> {
                 }
             }
             Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -1102,10 +1166,18 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn iter_files_with_sizes(root: &Path, excludes: &[String]) -> Result<Vec<(PathBuf, String, u64)>, String> {
-    let patterns: Vec<Pattern> = excludes.iter().filter_map(|p| Pattern::new(p).ok()).collect();
+fn iter_files_with_sizes(
+    root: &Path,
+    excludes: &[String],
+) -> Result<Vec<(PathBuf, String, u64)>, String> {
+    let patterns: Vec<Pattern> = excludes
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
     let root_abs = fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let parent = root_abs.parent().ok_or_else(|| "missing parent".to_string())?;
+    let parent = root_abs
+        .parent()
+        .ok_or_else(|| "missing parent".to_string())?;
     let mut files = Vec::new();
 
     for ent in WalkDir::new(&root_abs).into_iter().filter_map(Result::ok) {
@@ -1155,12 +1227,18 @@ fn recv_meta_string(port: u16, session: Option<&Session>) -> Result<Option<Strin
     Ok(Some(String::from_utf8_lossy(&data).to_string()))
 }
 
-fn send_meta_string(ip: &str, port: u16, payload: &str, session: Option<&Session>) -> Result<(), String> {
+fn send_meta_string(
+    ip: &str,
+    port: u16,
+    payload: &str,
+    session: Option<&Session>,
+) -> Result<(), String> {
     let meta_port = port + 1;
     let stream = connect_with_retry(ip, meta_port, Duration::from_secs(120))?;
     if let Some(sess) = session {
         let mut ew = EncryptWriter::new(stream, &sess.key);
-        ew.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+        ew.write_all(payload.as_bytes())
+            .map_err(|e| e.to_string())?;
         ew.flush().map_err(|e| e.to_string())?;
     } else {
         let mut s = stream;
@@ -1176,7 +1254,11 @@ pub(crate) fn receive_auto(
     expected: Option<&str>,
     secure: bool,
 ) -> Result<(), String> {
-    let session = if secure { Some(sas_receiver_handshake(port)?) } else { None };
+    let session = if secure {
+        Some(sas_receiver_handshake(port)?)
+    } else {
+        None
+    };
     let hb_done = Arc::new(AtomicBool::new(false));
     let status_handle = spawn_status_receiver(port);
     let heartbeat_handle = spawn_heartbeat_receiver(port, hb_done.clone());
@@ -1188,7 +1270,9 @@ pub(crate) fn receive_auto(
 
     if let Some(exp) = expected {
         if exp != mode {
-            return Err(format!("Incoming stream is '{mode}', but receiver expects '{exp}'"));
+            return Err(format!(
+                "Incoming stream is '{mode}', but receiver expects '{exp}'"
+            ));
         }
     }
 
@@ -1220,11 +1304,19 @@ fn receive_file_stream(
         None => {
             let dir = PathBuf::from(".");
             fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            (unique_path(&dir, &format!(".xfer-tmp-{}.part", now_secs())), None, dir)
+            (
+                unique_path(&dir, &format!(".xfer-tmp-{}.part", now_secs())),
+                None,
+                dir,
+            )
         }
         Some(ref p) if p.exists() && p.is_dir() => {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
-            (unique_path(p, &format!(".xfer-tmp-{}.part", now_secs())), None, p.clone())
+            (
+                unique_path(p, &format!(".xfer-tmp-{}.part", now_secs())),
+                None,
+                p.clone(),
+            )
         }
         Some(p) => {
             if p.exists() && !force {
@@ -1238,14 +1330,15 @@ fn receive_file_stream(
         }
     };
 
-    let mut out = File::create(&tmp_path).map_err(|e| format!("create {}: {e}", tmp_path.display()))?;
+    let mut out =
+        File::create(&tmp_path).map_err(|e| format!("create {}: {e}", tmp_path.display()))?;
     let mut hasher = Sha256::new();
 
     if let Some(sess) = session {
         let mut dr = DecryptReader::new(conn, &sess.key);
         let mut buf = vec![0u8; CHUNK];
         loop {
-            let n = dr.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = read_retry(&mut dr, &mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
@@ -1256,7 +1349,7 @@ fn receive_file_stream(
         let mut stream = conn;
         let mut buf = vec![0u8; CHUNK];
         loop {
-            let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = read_retry(&mut stream, &mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
@@ -1273,7 +1366,10 @@ fn receive_file_stream(
             if !sender_hash.is_empty() && sender_hash != local_hash {
                 let corrupt = unique_path(&dest_dir, &(sender_name.clone() + ".corrupt"));
                 fs::rename(&tmp_path, &corrupt).ok();
-                return Err(format!("VERIFY FAIL checksum mismatch; corrupt file saved as {}", corrupt.display()));
+                return Err(format!(
+                    "VERIFY FAIL checksum mismatch; corrupt file saved as {}",
+                    corrupt.display()
+                ));
             } else if !sender_hash.is_empty() {
                 verified = true;
             }
@@ -1330,7 +1426,10 @@ fn receive_dir_stream(
 ) -> Result<(), String> {
     let out_dir = out_path.unwrap_or_else(|| PathBuf::from("."));
     if out_dir.exists() && !out_dir.is_dir() {
-        return Err(format!("--out points to file but directory stream incoming: {}", out_dir.display()));
+        return Err(format!(
+            "--out points to file but directory stream incoming: {}",
+            out_dir.display()
+        ));
     }
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
@@ -1351,7 +1450,11 @@ fn receive_dir_stream(
     Ok(())
 }
 
-fn extract_tar_and_hash<R: Read>(reader: R, out_dir: &Path, local_hashes: &mut HashMap<String, String>) -> Result<(), String> {
+fn extract_tar_and_hash<R: Read>(
+    reader: R,
+    out_dir: &Path,
+    local_hashes: &mut HashMap<String, String>,
+) -> Result<(), String> {
     let mut ar = Archive::new(reader);
     let entries = ar.entries().map_err(|e| e.to_string())?;
     for item in entries {
@@ -1409,19 +1512,32 @@ fn verify_manifest(manifest: &str, local_hashes: &HashMap<String, String>) -> Re
         println!("[ OK ] VERIFY OK — all files match manifest.");
         Ok(())
     } else {
-        Err(format!("VERIFY FAIL — {} mismatches (showing first: {})", failures.len(), failures[0]))
+        Err(format!(
+            "VERIFY FAIL — {} mismatches (showing first: {})",
+            failures.len(),
+            failures[0]
+        ))
     }
 }
 
 pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), String> {
-    let session = if secure { Some(sas_sender_handshake(ip, port)?) } else { None };
+    let session = if secure {
+        Some(sas_sender_handshake(ip, port)?)
+    } else {
+        None
+    };
 
     let filename = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "xfer.bin".to_string());
 
-    println!("[INFO] Sending file '{}' -> {}:{}", path.display(), ip, port);
+    println!(
+        "[INFO] Sending file '{}' -> {}:{}",
+        path.display(),
+        ip,
+        port
+    );
     let mut stream = connect_with_retry(ip, port, Duration::from_secs(30))?;
     write_preface(&mut stream, "file", &filename)?;
     let total = fs::metadata(path).map_err(|e| e.to_string())?.len();
@@ -1430,14 +1546,11 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
     let status_done = Arc::new(AtomicBool::new(false));
     let heartbeat_done = Arc::new(AtomicBool::new(false));
     let local_progress_done = Arc::new(AtomicBool::new(false));
-    let status_thread = spawn_status_sender(
-        ip.to_string(),
-        port,
-        progress.clone(),
-        status_done.clone(),
-    );
+    let status_thread =
+        spawn_status_sender(ip.to_string(), port, progress.clone(), status_done.clone());
     let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
-    let local_progress_thread = spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
+    let local_progress_thread =
+        spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
 
     let mut hasher = Sha256::new();
     let mut f = File::open(path).map_err(|e| e.to_string())?;
@@ -1446,28 +1559,32 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
         let mut ew = EncryptWriter::new(stream, &sess.key);
         let mut buf = vec![0u8; CHUNK];
         loop {
-            let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = read_retry(&mut f, &mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
             ew.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             progress.sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
-            progress.file_sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            progress
+                .file_sent_bytes
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
         ew.flush().map_err(|e| e.to_string())?;
     } else {
         let mut plain = stream;
         let mut buf = vec![0u8; CHUNK];
         loop {
-            let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = read_retry(&mut f, &mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
             plain.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             progress.sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
-            progress.file_sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            progress
+                .file_sent_bytes
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
     }
     progress.files_done.store(1, Ordering::Relaxed);
@@ -1489,12 +1606,27 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
     Ok(())
 }
 
-pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool) -> Result<(), String> {
-    let session = if secure { Some(sas_sender_handshake(ip, port)?) } else { None };
+pub(crate) fn send_dir(
+    ip: &str,
+    path: &Path,
+    port: u16,
+    excludes: &[String],
+    secure: bool,
+) -> Result<(), String> {
+    let session = if secure {
+        Some(sas_sender_handshake(ip, port)?)
+    } else {
+        None
+    };
 
     let files = iter_files_with_sizes(path, excludes)?;
     let total_data: u64 = files.iter().map(|(_, _, sz)| *sz).sum();
-    println!("[INFO] Sending directory '{}' -> {}:{}", path.display(), ip, port);
+    println!(
+        "[INFO] Sending directory '{}' -> {}:{}",
+        path.display(),
+        ip,
+        port
+    );
 
     let mut manifest = String::new();
     let mut stream = connect_with_retry(ip, port, Duration::from_secs(30))?;
@@ -1507,14 +1639,11 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
     let status_done = Arc::new(AtomicBool::new(false));
     let heartbeat_done = Arc::new(AtomicBool::new(false));
     let local_progress_done = Arc::new(AtomicBool::new(false));
-    let status_thread = spawn_status_sender(
-        ip.to_string(),
-        port,
-        progress.clone(),
-        status_done.clone(),
-    );
+    let status_thread =
+        spawn_status_sender(ip.to_string(), port, progress.clone(), status_done.clone());
     let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
-    let local_progress_thread = spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
+    let local_progress_thread =
+        spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
 
     if let Some(sess) = session.as_ref() {
         let mut ew = EncryptWriter::new(stream, &sess.key);
@@ -1523,14 +1652,17 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
             for (ap, rel, _sz) in &files {
                 let file = File::open(ap).map_err(|e| e.to_string())?;
                 let meta = file.metadata().map_err(|e| e.to_string())?;
-                progress.file_total_bytes.store(meta.len(), Ordering::Relaxed);
+                progress
+                    .file_total_bytes
+                    .store(meta.len(), Ordering::Relaxed);
                 progress.file_sent_bytes.store(0, Ordering::Relaxed);
                 let mut hdr = Header::new_gnu();
                 hdr.set_size(meta.len());
                 hdr.set_mode(0o644);
                 hdr.set_cksum();
                 let mut hr = ProgressHashingReader::new(file, progress.clone());
-                tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
+                tw.append_data(&mut hdr, rel, &mut hr)
+                    .map_err(|e| e.to_string())?;
                 manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
             }
@@ -1542,14 +1674,17 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
         for (ap, rel, _sz) in &files {
             let file = File::open(ap).map_err(|e| e.to_string())?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
-            progress.file_total_bytes.store(meta.len(), Ordering::Relaxed);
+            progress
+                .file_total_bytes
+                .store(meta.len(), Ordering::Relaxed);
             progress.file_sent_bytes.store(0, Ordering::Relaxed);
             let mut hdr = Header::new_gnu();
             hdr.set_size(meta.len());
             hdr.set_mode(0o644);
             hdr.set_cksum();
             let mut hr = ProgressHashingReader::new(file, progress.clone());
-            tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
+            tw.append_data(&mut hdr, rel, &mut hr)
+                .map_err(|e| e.to_string())?;
             manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
             progress.files_done.fetch_add(1, Ordering::Relaxed);
         }
@@ -1574,6 +1709,8 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::io::Read;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -1623,5 +1760,60 @@ mod tests {
         assert!(should_include_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))));
         assert!(!should_include_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
         assert!(!should_include_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
+    }
+
+    #[test]
+    fn render_progress_is_human_readable() {
+        let snap = ProgressSnapshot {
+            sent_bytes: 1024 * 1024,
+            total_bytes: 4 * 1024 * 1024,
+            file_sent_bytes: 256 * 1024,
+            file_total_bytes: 1024 * 1024,
+            files_done: 1,
+            files_total: 4,
+        };
+        let line = render_progress("SEND", snap, 1024.0 * 1024.0);
+        assert!(line.contains("overall"));
+        assert!(line.contains("file"));
+        assert!(line.contains("files 1/4"));
+        assert!(line.contains("MiB/s"));
+        assert!(line.contains("ETA"));
+        assert!(line.contains("1.00 MiB / 4.00 MiB"));
+    }
+
+    struct InterruptOnceReader {
+        interrupted: Cell<bool>,
+        data: &'static [u8],
+        pos: usize,
+    }
+
+    impl Read for InterruptOnceReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted.get() {
+                self.interrupted.set(true);
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "retry"));
+            }
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let remaining = &self.data[self.pos..];
+            let n = remaining.len().min(buf.len());
+            buf[..n].copy_from_slice(&remaining[..n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_retry_handles_interrupted_io() {
+        let mut reader = InterruptOnceReader {
+            interrupted: Cell::new(false),
+            data: b"abc",
+            pos: 0,
+        };
+        let mut out = [0u8; 8];
+        let n = read_retry(&mut reader, &mut out).expect("read should succeed after interrupted");
+        assert_eq!(n, 3);
+        assert_eq!(&out[..n], b"abc");
     }
 }
