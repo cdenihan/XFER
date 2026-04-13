@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit as AeadKeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use clap::{Parser, Subcommand};
 use glob::Pattern;
 use hmac::{Hmac, Mac};
+use hmac::digest::KeyInit as HmacKeyInit;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tar::{Archive, Builder, Header};
@@ -21,8 +24,9 @@ type HmacSha256 = Hmac<Sha256>;
 const APP_NAME: &str = "XFER";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PORT: u16 = 9000;
-const CHUNK: usize = 1024 * 1024;
+const CHUNK: usize = 4 * 1024 * 1024;
 const SAS_CTRL_OFFSET: u16 = 1;
+const STATUS_OFFSET: u16 = 2;
 const META_ACCEPT_BUDGET: Duration = Duration::from_secs(60);
 const SAS_ACCEPT_BUDGET: Duration = Duration::from_secs(120);
 
@@ -142,18 +146,37 @@ fn run() -> Result<(), String> {
 }
 
 fn local_ips() -> Vec<String> {
-    let mut out = vec!["127.0.0.1".to_string()];
-    if let Ok(iter) = ("localhost", 0).to_socket_addrs() {
-        for sa in iter {
-            if sa.ip().is_ipv4() {
-                let s = sa.ip().to_string();
-                if !out.contains(&s) {
-                    out.push(s);
+    let mut ips: Vec<String> = Vec::new();
+    if let Ok(host) = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| std::env::var("USERDOMAIN"))
+    {
+        if let Ok(iter) = (host.as_str(), 0).to_socket_addrs() {
+            for sa in iter {
+                let ip = sa.ip();
+                if ip.is_ipv4() {
+                    let s = ip.to_string();
+                    if !ips.contains(&s) {
+                        ips.push(s);
+                    }
                 }
             }
         }
     }
-    out
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("8.8.8.8:80");
+        if let Ok(SocketAddr::V4(v4)) = sock.local_addr() {
+            let s = v4.ip().to_string();
+            if !ips.contains(&s) {
+                ips.push(s);
+            }
+        }
+    }
+    if !ips.iter().any(|x| x == "127.0.0.1") {
+        ips.push("127.0.0.1".to_string());
+    }
+    ips.sort();
+    ips
 }
 
 fn xfer_home() -> Result<PathBuf, String> {
@@ -238,7 +261,7 @@ fn sas_from(fp_hex: &str, ns_hex: &str, nr_hex: &str) -> Result<String, String> 
     msg.extend_from_slice(&nr);
     msg.extend_from_slice(b"XFER-SAS1");
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&key).map_err(|e| format!("hmac: {e}"))?;
+    let mut mac = <HmacSha256 as HmacKeyInit>::new_from_slice(&key).map_err(|e| format!("hmac: {e}"))?;
     mac.update(&msg);
     let out = mac.finalize().into_bytes();
     let mut nbuf = [0u8; 8];
@@ -327,8 +350,9 @@ fn connect_with_retry(host: &str, port: u16, timeout: Duration) -> Result<TcpStr
     while Instant::now() < deadline {
         match TcpStream::connect((host, port)) {
             Ok(s) => {
-                s.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                s.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                s.set_nonblocking(false).ok();
+                s.set_read_timeout(None).ok();
+                s.set_write_timeout(None).ok();
                 return Ok(s);
             }
             Err(e) => {
@@ -351,8 +375,9 @@ fn accept_one(l: &TcpListener, deadline: Option<Instant>) -> Result<(TcpStream, 
     loop {
         match l.accept() {
             Ok((s, a)) => {
-                s.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                s.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                s.set_nonblocking(false).ok();
+                s.set_read_timeout(None).ok();
+                s.set_write_timeout(None).ok();
                 return Ok((s, a.ip().to_string()));
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -366,6 +391,65 @@ fn accept_one(l: &TcpListener, deadline: Option<Instant>) -> Result<(TcpStream, 
             Err(e) => return Err(e.to_string()),
         }
     }
+}
+
+fn status_port(port: u16) -> Option<u16> {
+    port.checked_add(STATUS_OFFSET)
+}
+
+fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
+    let p = status_port(port)?;
+    Some(std::thread::spawn(move || {
+        let Ok(l) = listener(p) else { return };
+        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180))) else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let msg = line.trim();
+                    if !msg.is_empty() {
+                        println!("[STATUS] {msg}");
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }))
+}
+
+fn spawn_status_sender(
+    ip: String,
+    port: u16,
+    bytes_done: Arc<AtomicU64>,
+    total: Option<u64>,
+    finished: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let p = status_port(port)?;
+    Some(std::thread::spawn(move || {
+        let Ok(mut stream) = connect_with_retry(&ip, p, Duration::from_secs(30)) else {
+            return;
+        };
+        loop {
+            let done = bytes_done.load(Ordering::Relaxed);
+            let msg = match total {
+                Some(t) => format!("sent={} total={}", done, t),
+                None => format!("sent={done}"),
+            };
+            if stream.write_all(msg.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+                return;
+            }
+            if finished.load(Ordering::Relaxed) {
+                let _ = stream.write_all(b"done=1\n");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }))
 }
 
 fn sas_receiver_handshake(port: u16) -> Result<Session, String> {
@@ -629,47 +713,78 @@ impl<R: Read> Read for DecryptReader<R> {
     }
 }
 
+struct HashingReader<R: Read> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R: Read> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finalize_hex(self) -> String {
+        hex::encode(self.hasher.finalize())
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
 fn write_preface(stream: &mut TcpStream, mode: &str, name: &str) -> Result<(), String> {
-    let line = format!("XFER2 MODE={mode} NAME={}\n\n", sanitize_name(name));
-    stream.write_all(line.as_bytes()).map_err(|e| e.to_string())
+    write_headers(
+        stream,
+        &[
+            ("PROTO", "XFER2".to_string()),
+            ("MODE", mode.to_string()),
+            ("NAME", sanitize_name(name)),
+        ],
+    )
 }
 
 fn read_preface(stream: &mut TcpStream) -> Result<(String, String), String> {
-    let mut reader = BufReader::new(stream);
-    let mut text = String::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        text.push_str(&line);
-        if text.contains("\n\n") {
-            break;
-        }
-        if text.len() > 2048 {
-            return Err("invalid preface".to_string());
+    let mut buf = Vec::new();
+    let mut one = [0u8; 1];
+    while !buf.ends_with(b"\n\n") {
+        match stream.read(&mut one) {
+            Ok(0) => break,
+            Ok(1) => {
+                buf.push(one[0]);
+                if buf.len() > 4096 {
+                    return Err("preface too large".to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+            Err(e) => return Err(e.to_string()),
         }
     }
-    let data = text.lines().next().unwrap_or_default().trim().to_string();
-    if !data.starts_with("XFER2 ") {
+    let text = String::from_utf8_lossy(&buf);
+    let mut hdr = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            hdr.insert(k.trim().to_ascii_uppercase(), v.trim().to_string());
+        }
+    }
+    if hdr.get("PROTO").map(String::as_str) != Some("XFER2") {
         return Err("bad preface".to_string());
     }
-    let mut mode = String::new();
-    let mut name = String::new();
-    for token in data.split_whitespace().skip(1) {
-        if let Some((k, v)) = token.split_once('=') {
-            if k == "MODE" {
-                mode = v.to_string();
-            } else if k == "NAME" {
-                name = v.to_string();
-            }
-        }
-    }
-    let inner = reader.into_inner();
-    inner
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .map_err(|e| e.to_string())?;
+    let mode = hdr.get("MODE").cloned().unwrap_or_default();
+    let name = hdr.get("NAME").cloned().unwrap_or_default();
     if mode.is_empty() {
         return Err("missing mode".to_string());
     }
@@ -711,20 +826,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn hash_file(path: &Path) -> Result<String, String> {
-    let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(hex::encode(h.finalize()))
 }
 
 fn iter_files_with_sizes(root: &Path, excludes: &[String]) -> Result<Vec<(PathBuf, String, u64)>, String> {
@@ -782,7 +883,7 @@ fn recv_meta_string(port: u16, session: Option<&Session>) -> Result<Option<Strin
 
 fn send_meta_string(ip: &str, port: u16, payload: &str, session: Option<&Session>) -> Result<(), String> {
     let meta_port = port + 1;
-    let stream = connect_with_retry(ip, meta_port, Duration::from_secs(30))?;
+    let stream = connect_with_retry(ip, meta_port, Duration::from_secs(120))?;
     if let Some(sess) = session {
         let mut ew = EncryptWriter::new(stream, &sess.key);
         ew.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
@@ -802,6 +903,7 @@ fn receive_auto(
     secure: bool,
 ) -> Result<(), String> {
     let session = if secure { Some(sas_receiver_handshake(port)?) } else { None };
+    let status_handle = spawn_status_receiver(port);
 
     println!("[INFO] Listening on data port {port} ...");
     let l = listener(port)?;
@@ -814,11 +916,15 @@ fn receive_auto(
         }
     }
 
-    match mode.as_str() {
+    let result = match mode.as_str() {
         "file" => receive_file_stream(conn, out_path, force, port, session.as_ref(), &remote_name),
         "dir" => receive_dir_stream(conn, out_path, port, session.as_ref()),
         _ => Err(format!("Unsupported mode: {mode}")),
+    };
+    if let Some(h) = status_handle {
+        let _ = h.join();
     }
+    result
 }
 
 fn receive_file_stream(
@@ -880,14 +986,16 @@ fn receive_file_stream(
     }
 
     let local_hash = hex::encode(hasher.finalize());
-    let meta = recv_meta_string(port, session)?;
-    if let Some(m) = meta {
+    let mut verified = false;
+    if let Some(m) = recv_meta_string(port, session)? {
         let mut it = m.trim().splitn(2, char::is_whitespace);
         if let Some(sender_hash) = it.next() {
             if !sender_hash.is_empty() && sender_hash != local_hash {
                 let corrupt = unique_path(&dest_dir, &(sender_name.clone() + ".corrupt"));
                 fs::rename(&tmp_path, &corrupt).ok();
                 return Err(format!("VERIFY FAIL checksum mismatch; corrupt file saved as {}", corrupt.display()));
+            } else if !sender_hash.is_empty() {
+                verified = true;
             }
         }
     }
@@ -914,7 +1022,11 @@ fn receive_file_stream(
         fs::rename(&tmp_path, &final_path).map_err(|e| e.to_string())?;
         println!("[ OK ] Saved: {}", final_path.display());
     }
-    println!("[ OK ] VERIFY OK — {local_hash}");
+    if verified {
+        println!("[ OK ] VERIFY OK — {local_hash}");
+    } else {
+        println!("[WARN] No checksum received; verification skipped.");
+    }
     Ok(())
 }
 
@@ -1032,6 +1144,16 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
     println!("[INFO] Sending file '{}' -> {}:{}", path.display(), ip, port);
     let mut stream = connect_with_retry(ip, port, Duration::from_secs(30))?;
     write_preface(&mut stream, "file", &filename)?;
+    let total = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let status_count = Arc::new(AtomicU64::new(0));
+    let status_done = Arc::new(AtomicBool::new(false));
+    let status_thread = spawn_status_sender(
+        ip.to_string(),
+        port,
+        status_count.clone(),
+        Some(total),
+        status_done.clone(),
+    );
 
     let mut hasher = Sha256::new();
     let mut f = File::open(path).map_err(|e| e.to_string())?;
@@ -1046,9 +1168,11 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
             }
             hasher.update(&buf[..n]);
             ew.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            status_count.fetch_add(n as u64, Ordering::Relaxed);
         }
         ew.flush().map_err(|e| e.to_string())?;
     } else {
+        let mut plain = stream;
         let mut buf = vec![0u8; CHUNK];
         loop {
             let n = f.read(&mut buf).map_err(|e| e.to_string())?;
@@ -1056,8 +1180,13 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
                 break;
             }
             hasher.update(&buf[..n]);
-            stream.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            plain.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            status_count.fetch_add(n as u64, Ordering::Relaxed);
         }
+    }
+    status_done.store(true, Ordering::Relaxed);
+    if let Some(h) = status_thread {
+        let _ = h.join();
     }
 
     let hash = hex::encode(hasher.finalize());
@@ -1071,6 +1200,7 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
     let session = if secure { Some(sas_sender_handshake(ip, port)?) } else { None };
 
     let files = iter_files_with_sizes(path, excludes)?;
+    let total_data: u64 = files.iter().map(|(_, _, sz)| *sz).sum();
     println!("[INFO] Sending directory '{}' -> {}:{}", path.display(), ip, port);
 
     let mut manifest = String::new();
@@ -1080,22 +1210,31 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "dir".to_string());
     write_preface(&mut stream, "dir", &base)?;
+    let status_count = Arc::new(AtomicU64::new(0));
+    let status_done = Arc::new(AtomicBool::new(false));
+    let status_thread = spawn_status_sender(
+        ip.to_string(),
+        port,
+        status_count.clone(),
+        Some(total_data),
+        status_done.clone(),
+    );
 
     if let Some(sess) = session.as_ref() {
         let mut ew = EncryptWriter::new(stream, &sess.key);
         {
             let mut tw = Builder::new(&mut ew);
             for (ap, rel, _sz) in &files {
-                let h = hash_file(ap)?;
-                manifest.push_str(&format!("{h}  {rel}\n"));
-
-                let mut file = File::open(ap).map_err(|e| e.to_string())?;
+                let file = File::open(ap).map_err(|e| e.to_string())?;
                 let meta = file.metadata().map_err(|e| e.to_string())?;
                 let mut hdr = Header::new_gnu();
                 hdr.set_size(meta.len());
                 hdr.set_mode(0o644);
                 hdr.set_cksum();
-                tw.append_data(&mut hdr, rel, &mut file).map_err(|e| e.to_string())?;
+                let mut hr = HashingReader::new(file);
+                tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
+                manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
+                status_count.fetch_add(meta.len(), Ordering::Relaxed);
             }
             tw.finish().map_err(|e| e.to_string())?;
         }
@@ -1103,18 +1242,22 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
     } else {
         let mut tw = Builder::new(stream);
         for (ap, rel, _sz) in &files {
-            let h = hash_file(ap)?;
-            manifest.push_str(&format!("{h}  {rel}\n"));
-
-            let mut file = File::open(ap).map_err(|e| e.to_string())?;
+            let file = File::open(ap).map_err(|e| e.to_string())?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
             let mut hdr = Header::new_gnu();
             hdr.set_size(meta.len());
             hdr.set_mode(0o644);
             hdr.set_cksum();
-            tw.append_data(&mut hdr, rel, &mut file).map_err(|e| e.to_string())?;
+            let mut hr = HashingReader::new(file);
+            tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
+            manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
+            status_count.fetch_add(meta.len(), Ordering::Relaxed);
         }
         tw.finish().map_err(|e| e.to_string())?;
+    }
+    status_done.store(true, Ordering::Relaxed);
+    if let Some(h) = status_thread {
+        let _ = h.join();
     }
 
     send_meta_string(ip, port, &manifest, session.as_ref())?;

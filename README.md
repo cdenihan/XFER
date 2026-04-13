@@ -6,6 +6,7 @@ XFER is a simple LAN file/directory transfer tool with:
 - transfer integrity verification (SHA-256)
 - TOFU + SAS peer trust prompts
 - end-to-end encryption (ChaCha20-Poly1305)
+- dedicated status stream on `port+2` for live progress updates
 - minimal, single-binary CLI
 
 ## Install
@@ -60,3 +61,4 @@ xfer recv-dir ./out-dir
 - Control channel: `port-1` for TOFU + SAS + key agreement
 - Data channel: `port` for file or tar stream
 - Meta channel: `port+1` for checksum/manifest verification
+- Status channel: `port+2` for progress/status messages

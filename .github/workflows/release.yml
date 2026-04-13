@@ -39,16 +39,32 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Copy artifact
+      - name: Copy and verify artifact hash
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/${{ matrix.artifact }}
+          SRC="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          DST="dist/${{ matrix.artifact }}"
+          cp "$SRC" "$DST"
+          SRC_HASH="$(sha256sum "$SRC" | awk '{print $1}')"
+          DST_HASH="$(sha256sum "$DST" | awk '{print $1}')"
+          if [ "$SRC_HASH" != "$DST_HASH" ]; then
+            echo "Hash mismatch after copy, retrying copy..."
+            cp "$SRC" "$DST"
+            DST_HASH="$(sha256sum "$DST" | awk '{print $1}')"
+            if [ "$SRC_HASH" != "$DST_HASH" ]; then
+              echo "Artifact hash mismatch persists after rewrite-copy."
+              exit 1
+            fi
+          fi
+          echo "$SRC_HASH  ${{ matrix.artifact }}" > "dist/${{ matrix.artifact }}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.sha256
 
   publish:
     needs: build
