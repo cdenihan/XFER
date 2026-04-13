@@ -182,7 +182,7 @@ cargo build --release
 
 Tag pushes (`v*`) trigger GitHub Actions to:
 
-1. build release binaries for Linux/macOS/Windows
+1. build release binaries for Linux (GNU + musl, x86_64 + ARM64), macOS (Intel + Apple Silicon), and Windows (x86_64 + ARM64)
 2. copy artifacts and verify SHA-256 copy integrity
 3. retry copy if hash mismatch
 4. fail release if mismatch persists
