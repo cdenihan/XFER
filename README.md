@@ -9,6 +9,7 @@ XFER is a LAN file and directory transfer tool focused on **effortless setup** w
 - File and directory transfer with integrity verification (SHA-256)
 - Multi-channel transport for throughput and observability
 - Interactive TUI mode with setup stats and live stream updates
+- Sender and receiver progress bars with speed + file/overall percentages
 - Advanced configuration via CLI flags (especially ports/security)
 
 ---
@@ -90,6 +91,7 @@ TUI features:
 - optional excludes and port overrides
 - secure/insecure mode selection
 - live status and heartbeat output during transfer
+- sender + receiver loading bars with throughput, file %, and overall %
 
 ---
 
@@ -100,6 +102,8 @@ TUI features:
 ```bash
 xfer ip
 ```
+
+`xfer ip` only lists non-loopback IPv4 addresses (localhost is excluded).
 
 ### Receive (auto file/dir)
 
@@ -182,4 +186,3 @@ Tag pushes (`v*`) trigger GitHub Actions to:
 3. retry copy if hash mismatch
 4. fail release if mismatch persists
 5. publish GitHub Release assets
-

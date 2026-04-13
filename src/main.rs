@@ -34,6 +34,7 @@ const STATUS_OFFSET: u16 = 2;
 const HEARTBEAT_OFFSET: u16 = 3;
 const META_ACCEPT_BUDGET: Duration = Duration::from_secs(60);
 const SAS_ACCEPT_BUDGET: Duration = Duration::from_secs(120);
+const PROGRESS_BAR_WIDTH: usize = 30;
 
 #[derive(Parser, Debug)]
 #[command(name = "xfer", version = VERSION, about = "Fast file/directory transfer with TOFU+SAS and end-to-end encryption")]
@@ -160,7 +161,7 @@ pub(crate) fn local_ips() -> Vec<String> {
         if let Ok(iter) = (host.as_str(), 0).to_socket_addrs() {
             for sa in iter {
                 let ip = sa.ip();
-                if ip.is_ipv4() {
+                if should_include_ip(ip) {
                     let s = ip.to_string();
                     if !ips.contains(&s) {
                         ips.push(s);
@@ -172,14 +173,13 @@ pub(crate) fn local_ips() -> Vec<String> {
     if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
         let _ = sock.connect("8.8.8.8:80");
         if let Ok(SocketAddr::V4(v4)) = sock.local_addr() {
-            let s = v4.ip().to_string();
-            if !ips.contains(&s) {
-                ips.push(s);
+            if should_include_ip((*v4.ip()).into()) {
+                let s = v4.ip().to_string();
+                if !ips.contains(&s) {
+                    ips.push(s);
+                }
             }
         }
-    }
-    if !ips.iter().any(|x| x == "127.0.0.1") {
-        ips.push("127.0.0.1".to_string());
     }
     ips.sort();
     ips
@@ -192,6 +192,10 @@ fn xfer_home() -> Result<PathBuf, String> {
     let p = Path::new(&home).join(".xfer");
     fs::create_dir_all(&p).map_err(|e| format!("create {}: {e}", p.display()))?;
     Ok(p)
+}
+
+fn should_include_ip(ip: std::net::IpAddr) -> bool {
+    ip.is_ipv4() && !ip.is_loopback() && !ip.is_unspecified()
 }
 
 fn identity_path() -> Result<PathBuf, String> {
@@ -399,6 +403,138 @@ fn accept_one(l: &TcpListener, deadline: Option<Instant>) -> Result<(TcpStream, 
     }
 }
 
+#[derive(Debug)]
+struct TransferProgress {
+    sent_bytes: AtomicU64,
+    total_bytes: AtomicU64,
+    file_sent_bytes: AtomicU64,
+    file_total_bytes: AtomicU64,
+    files_done: AtomicU64,
+    files_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProgressSnapshot {
+    sent_bytes: u64,
+    total_bytes: u64,
+    file_sent_bytes: u64,
+    file_total_bytes: u64,
+    files_done: u64,
+    files_total: u64,
+}
+
+impl TransferProgress {
+    fn new(total_bytes: u64, files_total: u64) -> Self {
+        Self {
+            sent_bytes: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(total_bytes),
+            file_sent_bytes: AtomicU64::new(0),
+            file_total_bytes: AtomicU64::new(0),
+            files_done: AtomicU64::new(0),
+            files_total: AtomicU64::new(files_total),
+        }
+    }
+
+    fn snapshot(&self) -> ProgressSnapshot {
+        ProgressSnapshot {
+            sent_bytes: self.sent_bytes.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes.load(Ordering::Relaxed),
+            file_sent_bytes: self.file_sent_bytes.load(Ordering::Relaxed),
+            file_total_bytes: self.file_total_bytes.load(Ordering::Relaxed),
+            files_done: self.files_done.load(Ordering::Relaxed),
+            files_total: self.files_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn progress_pct(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (done as f64 * 100.0) / total as f64
+    }
+}
+
+fn bar(done: u64, total: u64) -> String {
+    if total == 0 {
+        return "-".repeat(PROGRESS_BAR_WIDTH);
+    }
+    let filled = ((done as f64 / total as f64) * PROGRESS_BAR_WIDTH as f64).round() as usize;
+    let filled = filled.min(PROGRESS_BAR_WIDTH);
+    format!(
+        "{}{}",
+        "=".repeat(filled),
+        "-".repeat(PROGRESS_BAR_WIDTH.saturating_sub(filled))
+    )
+}
+
+fn human_bytes_per_sec(v: f64) -> String {
+    let units = ["B/s", "KiB/s", "MiB/s", "GiB/s"];
+    let mut n = v.max(0.0);
+    let mut idx = 0usize;
+    while n >= 1024.0 && idx + 1 < units.len() {
+        n /= 1024.0;
+        idx += 1;
+    }
+    format!("{n:.2} {}", units[idx])
+}
+
+fn render_progress(prefix: &str, snap: ProgressSnapshot, speed_bps: f64) -> String {
+    let overall_pct = progress_pct(snap.sent_bytes, snap.total_bytes);
+    let file_pct = progress_pct(snap.file_sent_bytes, snap.file_total_bytes);
+    let overall_bar = bar(snap.sent_bytes, snap.total_bytes);
+    let file_bar = bar(snap.file_sent_bytes, snap.file_total_bytes);
+    format!(
+        "\r[{prefix}] overall [{overall_bar}] {:>6.2}% ({}/{}) | file [{file_bar}] {:>6.2}% ({}/{}) | files {}/{} | {}",
+        overall_pct,
+        snap.sent_bytes,
+        snap.total_bytes,
+        file_pct,
+        snap.file_sent_bytes,
+        snap.file_total_bytes,
+        snap.files_done,
+        snap.files_total,
+        human_bytes_per_sec(speed_bps),
+    )
+}
+
+fn parse_status_line(line: &str) -> Option<ProgressSnapshot> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let mut sent = None;
+    let mut total = None;
+    let mut file_sent = None;
+    let mut file_total = None;
+    let mut files_done = None;
+    let mut files_total = None;
+    for kv in line.split_whitespace() {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        let Ok(num) = v.parse::<u64>() else {
+            continue;
+        };
+        match k {
+            "sent" => sent = Some(num),
+            "total" => total = Some(num),
+            "file_sent" => file_sent = Some(num),
+            "file_total" => file_total = Some(num),
+            "files_done" => files_done = Some(num),
+            "files_total" => files_total = Some(num),
+            _ => {}
+        }
+    }
+    Some(ProgressSnapshot {
+        sent_bytes: sent.unwrap_or(0),
+        total_bytes: total.unwrap_or(0),
+        file_sent_bytes: file_sent.unwrap_or(0),
+        file_total_bytes: file_total.unwrap_or(0),
+        files_done: files_done.unwrap_or(0),
+        files_total: files_total.unwrap_or(0),
+    })
+}
+
 fn status_port(port: u16) -> Option<u16> {
     port.checked_add(STATUS_OFFSET)
 }
@@ -416,6 +552,7 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
         };
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
+        let started = Instant::now();
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -423,20 +560,31 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
                 Ok(_) => {
                     let msg = line.trim();
                     if !msg.is_empty() {
-                        println!("[STATUS] {msg}");
+                        if msg == "done=1" {
+                            println!();
+                            println!("[STATUS] transfer status stream complete.");
+                            break;
+                        }
+                        if let Some(snap) = parse_status_line(msg) {
+                            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                            let speed = snap.sent_bytes as f64 / elapsed;
+                            let rendered = render_progress("RECV", snap, speed);
+                            print!("{rendered}");
+                            let _ = io::stdout().flush();
+                        }
                     }
                 }
                 Err(_) => break,
             }
         }
+        println!();
     }))
 }
 
 fn spawn_status_sender(
     ip: String,
     port: u16,
-    bytes_done: Arc<AtomicU64>,
-    total: Option<u64>,
+    progress: Arc<TransferProgress>,
     finished: Arc<AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let p = status_port(port)?;
@@ -445,11 +593,16 @@ fn spawn_status_sender(
             return;
         };
         loop {
-            let done = bytes_done.load(Ordering::Relaxed);
-            let msg = match total {
-                Some(t) => format!("sent={} total={}", done, t),
-                None => format!("sent={done}"),
-            };
+            let snap = progress.snapshot();
+            let msg = format!(
+                "sent={} total={} file_sent={} file_total={} files_done={} files_total={}",
+                snap.sent_bytes,
+                snap.total_bytes,
+                snap.file_sent_bytes,
+                snap.file_total_bytes,
+                snap.files_done,
+                snap.files_total
+            );
             if stream.write_all(msg.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
                 return;
             }
@@ -462,6 +615,29 @@ fn spawn_status_sender(
     }))
 }
 
+fn spawn_local_progress(
+    label: &'static str,
+    progress: Arc<TransferProgress>,
+    done: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            let snap = progress.snapshot();
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            let speed = snap.sent_bytes as f64 / elapsed;
+            let rendered = render_progress(label, snap, speed);
+            print!("{rendered}");
+            let _ = io::stdout().flush();
+            if done.load(Ordering::Relaxed) {
+                println!();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    })
+}
+
 fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
     let p = heartbeat_port(port)?;
     Some(std::thread::spawn(move || {
@@ -469,6 +645,7 @@ fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thr
         let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180))) else {
             return;
         };
+        println!("[INFO] Heartbeat channel connected on port {p}.");
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         let mut last_seen = Instant::now();
@@ -478,9 +655,8 @@ fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thr
                 Ok(0) => break,
                 Ok(_) => {
                     last_seen = Instant::now();
-                    let msg = line.trim();
-                    if !msg.is_empty() {
-                        println!("[HEARTBEAT] {msg}");
+                    if line.trim() == "done=1" {
+                        break;
                     }
                 }
                 Err(_) => {
@@ -491,6 +667,7 @@ fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thr
                 }
             }
         }
+        println!("[INFO] Heartbeat channel closed.");
     }))
 }
 
@@ -800,6 +977,39 @@ impl<R: Read> Read for HashingReader<R> {
         let n = self.inner.read(buf)?;
         if n > 0 {
             self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
+struct ProgressHashingReader<R: Read> {
+    inner: HashingReader<R>,
+    progress: Arc<TransferProgress>,
+}
+
+impl<R: Read> ProgressHashingReader<R> {
+    fn new(inner: R, progress: Arc<TransferProgress>) -> Self {
+        Self {
+            inner: HashingReader::new(inner),
+            progress,
+        }
+    }
+
+    fn finalize_hex(self) -> String {
+        self.inner.finalize_hex()
+    }
+}
+
+impl<R: Read> Read for ProgressHashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.progress
+                .sent_bytes
+                .fetch_add(n as u64, Ordering::Relaxed);
+            self.progress
+                .file_sent_bytes
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
         Ok(n)
     }
@@ -1215,17 +1425,19 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
     let mut stream = connect_with_retry(ip, port, Duration::from_secs(30))?;
     write_preface(&mut stream, "file", &filename)?;
     let total = fs::metadata(path).map_err(|e| e.to_string())?.len();
-    let status_count = Arc::new(AtomicU64::new(0));
+    let progress = Arc::new(TransferProgress::new(total, 1));
+    progress.file_total_bytes.store(total, Ordering::Relaxed);
     let status_done = Arc::new(AtomicBool::new(false));
     let heartbeat_done = Arc::new(AtomicBool::new(false));
+    let local_progress_done = Arc::new(AtomicBool::new(false));
     let status_thread = spawn_status_sender(
         ip.to_string(),
         port,
-        status_count.clone(),
-        Some(total),
+        progress.clone(),
         status_done.clone(),
     );
     let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
+    let local_progress_thread = spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
 
     let mut hasher = Sha256::new();
     let mut f = File::open(path).map_err(|e| e.to_string())?;
@@ -1240,7 +1452,8 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
             }
             hasher.update(&buf[..n]);
             ew.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            status_count.fetch_add(n as u64, Ordering::Relaxed);
+            progress.sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            progress.file_sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
         }
         ew.flush().map_err(|e| e.to_string())?;
     } else {
@@ -1253,17 +1466,21 @@ pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Resul
             }
             hasher.update(&buf[..n]);
             plain.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            status_count.fetch_add(n as u64, Ordering::Relaxed);
+            progress.sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            progress.file_sent_bytes.fetch_add(n as u64, Ordering::Relaxed);
         }
     }
+    progress.files_done.store(1, Ordering::Relaxed);
     status_done.store(true, Ordering::Relaxed);
     heartbeat_done.store(true, Ordering::Relaxed);
+    local_progress_done.store(true, Ordering::Relaxed);
     if let Some(h) = status_thread {
         let _ = h.join();
     }
     if let Some(h) = heartbeat_thread {
         let _ = h.join();
     }
+    let _ = local_progress_thread.join();
 
     let hash = hex::encode(hasher.finalize());
     let payload = format!("{hash}  {filename}\n");
@@ -1286,17 +1503,18 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "dir".to_string());
     write_preface(&mut stream, "dir", &base)?;
-    let status_count = Arc::new(AtomicU64::new(0));
+    let progress = Arc::new(TransferProgress::new(total_data, files.len() as u64));
     let status_done = Arc::new(AtomicBool::new(false));
     let heartbeat_done = Arc::new(AtomicBool::new(false));
+    let local_progress_done = Arc::new(AtomicBool::new(false));
     let status_thread = spawn_status_sender(
         ip.to_string(),
         port,
-        status_count.clone(),
-        Some(total_data),
+        progress.clone(),
         status_done.clone(),
     );
     let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
+    let local_progress_thread = spawn_local_progress("SEND", progress.clone(), local_progress_done.clone());
 
     if let Some(sess) = session.as_ref() {
         let mut ew = EncryptWriter::new(stream, &sess.key);
@@ -1305,14 +1523,16 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
             for (ap, rel, _sz) in &files {
                 let file = File::open(ap).map_err(|e| e.to_string())?;
                 let meta = file.metadata().map_err(|e| e.to_string())?;
+                progress.file_total_bytes.store(meta.len(), Ordering::Relaxed);
+                progress.file_sent_bytes.store(0, Ordering::Relaxed);
                 let mut hdr = Header::new_gnu();
                 hdr.set_size(meta.len());
                 hdr.set_mode(0o644);
                 hdr.set_cksum();
-                let mut hr = HashingReader::new(file);
+                let mut hr = ProgressHashingReader::new(file, progress.clone());
                 tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
                 manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
-                status_count.fetch_add(meta.len(), Ordering::Relaxed);
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
             }
             tw.finish().map_err(|e| e.to_string())?;
         }
@@ -1322,25 +1542,29 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
         for (ap, rel, _sz) in &files {
             let file = File::open(ap).map_err(|e| e.to_string())?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
+            progress.file_total_bytes.store(meta.len(), Ordering::Relaxed);
+            progress.file_sent_bytes.store(0, Ordering::Relaxed);
             let mut hdr = Header::new_gnu();
             hdr.set_size(meta.len());
             hdr.set_mode(0o644);
             hdr.set_cksum();
-            let mut hr = HashingReader::new(file);
+            let mut hr = ProgressHashingReader::new(file, progress.clone());
             tw.append_data(&mut hdr, rel, &mut hr).map_err(|e| e.to_string())?;
             manifest.push_str(&format!("{}  {rel}\n", hr.finalize_hex()));
-            status_count.fetch_add(meta.len(), Ordering::Relaxed);
+            progress.files_done.fetch_add(1, Ordering::Relaxed);
         }
         tw.finish().map_err(|e| e.to_string())?;
     }
     status_done.store(true, Ordering::Relaxed);
     heartbeat_done.store(true, Ordering::Relaxed);
+    local_progress_done.store(true, Ordering::Relaxed);
     if let Some(h) = status_thread {
         let _ = h.join();
     }
     if let Some(h) = heartbeat_thread {
         let _ = h.join();
     }
+    let _ = local_progress_thread.join();
 
     send_meta_string(ip, port, &manifest, session.as_ref())?;
     println!("[ OK ] Manifest sent.");
@@ -1350,6 +1574,7 @@ pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], se
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn sanitize_filename_works() {
@@ -1377,5 +1602,26 @@ mod tests {
 
         let bad = verify_manifest("def  dir/file.txt\n", &hashes);
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn status_line_parsing_extracts_progress() {
+        let snap = parse_status_line(
+            "sent=120 total=200 file_sent=20 file_total=50 files_done=1 files_total=4",
+        )
+        .expect("snapshot");
+        assert_eq!(snap.sent_bytes, 120);
+        assert_eq!(snap.total_bytes, 200);
+        assert_eq!(snap.file_sent_bytes, 20);
+        assert_eq!(snap.file_total_bytes, 50);
+        assert_eq!(snap.files_done, 1);
+        assert_eq!(snap.files_total, 4);
+    }
+
+    #[test]
+    fn ip_filter_excludes_loopback_and_unspecified() {
+        assert!(should_include_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))));
+        assert!(!should_include_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(!should_include_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
     }
 }
