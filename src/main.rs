@@ -522,6 +522,9 @@ fn render_progress(prefix: &str, snap: ProgressSnapshot, speed_bps: f64) -> Stri
 }
 
 /// Writes progress in-place on one terminal row, clearing leftovers from longer prior frames.
+///
+/// `prev_len` tracks the prior rendered character width so we can append enough spaces
+/// to erase stale trailing characters when the new frame is shorter.
 fn print_progress_in_place(line: &str, prev_len: &mut usize) {
     let current_len = line.chars().count();
     let clear_tail = if *prev_len > current_len {

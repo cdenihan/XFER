@@ -104,8 +104,7 @@ TUI features:
 xfer ip
 ```
 
-`xfer ip` only lists non-loopback IPv4 addresses (localhost is excluded) to avoid
-showing loopback-only endpoints that are not useful for peer-to-peer transfers.
+`xfer ip` only lists non-loopback IPv4 addresses to show endpoints useful for peer-to-peer transfers.
 
 ### Receive (auto file/dir)
 
