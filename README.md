@@ -88,10 +88,11 @@ TUI features:
 - guided send/receive setup
 - per-transfer setup stats (file count/bytes for directories)
 - explicit channel port display before transfer
-- optional excludes and port overrides
-- secure/insecure mode selection
+- secure mode + default ports automatically applied
+- optional advanced overrides for port/security only when requested
+- optional excludes
 - live status and heartbeat output during transfer
-- sender + receiver loading bars with throughput, file %, and overall %
+- sender + receiver single-line progress with throughput, file %, overall %, and ETA
 
 ---
 

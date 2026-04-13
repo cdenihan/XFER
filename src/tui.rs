@@ -45,14 +45,20 @@ fn print_setup_stats(path: &PathBuf) {
                 }
             }
         }
-        println!("[TUI] setup: dir={} files={} bytes={}", path.display(), files, bytes);
+        println!(
+            "[TUI] setup: dir={} files={} bytes={}",
+            path.display(),
+            files,
+            bytes
+        );
     }
 }
 
 pub(crate) fn run_tui() -> Result<(), String> {
     println!("XFER TUI");
     println!("========");
-    println!("Simple mode for fast setup; advanced users can customize ports/security.");
+    println!("Secure mode and default ports are used automatically.");
+    println!("Advanced users can opt in to override them per transfer.");
 
     loop {
         println!();
@@ -65,8 +71,12 @@ pub(crate) fn run_tui() -> Result<(), String> {
         match choice.as_str() {
             "1" => {
                 let out = ask("Output path (blank for current dir): ")?;
-                let port = ask_u16("Data port", super::DEFAULT_PORT)?;
-                let secure = ask_bool("Use secure mode (TOFU+SAS + Rust E2E encryption)?", true)?;
+                let mut port = super::DEFAULT_PORT;
+                let mut secure = true;
+                if ask_bool("Override default port/security?", false)? {
+                    port = ask_u16("Data port", super::DEFAULT_PORT)?;
+                    secure = !ask_bool("Disable secure mode for this transfer?", false)?;
+                }
                 let force = ask_bool("Allow overwrite for file mode?", false)?;
                 let (ctrl, data, meta, status) = super::channel_ports(port);
                 println!(
@@ -77,14 +87,22 @@ pub(crate) fn run_tui() -> Result<(), String> {
                     status,
                     status.saturating_add(1)
                 );
-                let out_opt = if out.is_empty() { None } else { Some(PathBuf::from(out)) };
+                let out_opt = if out.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(out))
+                };
                 super::server::receive(out_opt, port, force, None, secure)?;
             }
             "2" => {
                 let ip = ask("Receiver IP: ")?;
                 let path = PathBuf::from(ask("Path to file or directory: ")?);
-                let port = ask_u16("Data port", super::DEFAULT_PORT)?;
-                let secure = ask_bool("Use secure mode (TOFU+SAS + Rust E2E encryption)?", true)?;
+                let mut port = super::DEFAULT_PORT;
+                let mut secure = true;
+                if ask_bool("Override default port/security?", false)? {
+                    port = ask_u16("Data port", super::DEFAULT_PORT)?;
+                    secure = !ask_bool("Disable secure mode for this transfer?", false)?;
+                }
                 let excludes = ask("Exclude patterns (comma separated, optional): ")?;
                 let excludes_vec: Vec<String> = excludes
                     .split(',')

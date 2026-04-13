@@ -34,7 +34,6 @@ const STATUS_OFFSET: u16 = 2;
 const HEARTBEAT_OFFSET: u16 = 3;
 const META_ACCEPT_BUDGET: Duration = Duration::from_secs(60);
 const SAS_ACCEPT_BUDGET: Duration = Duration::from_secs(120);
-const PROGRESS_BAR_WIDTH: usize = 30;
 
 #[derive(Parser, Debug)]
 #[command(name = "xfer", version = VERSION, about = "Fast file/directory transfer with TOFU+SAS and end-to-end encryption")]
@@ -464,19 +463,6 @@ fn progress_pct(done: u64, total: u64) -> f64 {
     }
 }
 
-fn bar(done: u64, total: u64) -> String {
-    if total == 0 {
-        return "-".repeat(PROGRESS_BAR_WIDTH);
-    }
-    let filled = ((done as f64 / total as f64) * PROGRESS_BAR_WIDTH as f64).round() as usize;
-    let filled = filled.min(PROGRESS_BAR_WIDTH);
-    format!(
-        "{}{}",
-        "=".repeat(filled),
-        "-".repeat(PROGRESS_BAR_WIDTH.saturating_sub(filled))
-    )
-}
-
 fn human_bytes_per_sec(v: f64) -> String {
     let units = ["B/s", "KiB/s", "MiB/s", "GiB/s"];
     let mut n = v.max(0.0);
@@ -521,21 +507,31 @@ fn eta_string(done: u64, total: u64, speed_bps: f64) -> String {
 
 fn render_progress(prefix: &str, snap: ProgressSnapshot, speed_bps: f64) -> String {
     let overall_pct = progress_pct(snap.sent_bytes, snap.total_bytes);
-    let file_pct = progress_pct(snap.file_sent_bytes, snap.file_total_bytes);
-    let overall_bar = bar(snap.sent_bytes, snap.total_bytes);
-    let file_bar = bar(snap.file_sent_bytes, snap.file_total_bytes);
+    let file_pct = progress_pct(snap.file_sent_bytes, snap.file_total_bytes).round() as u64;
+    let overall_pct = overall_pct.round() as u64;
     let eta = eta_string(snap.sent_bytes, snap.total_bytes, speed_bps);
     format!(
-        "\r[{prefix}] overall [{overall_bar}] {:>6.2}% {} / {} | file [{file_bar}] {:>6.2}% | files {}/{} | {} | ETA {}",
-        overall_pct,
+        "[{prefix}] {overall_pct:>3}% {} / {} | file {file_pct:>3}% | files {}/{} | {} | ETA {}",
         human_bytes(snap.sent_bytes),
         human_bytes(snap.total_bytes),
-        file_pct,
         snap.files_done,
         snap.files_total,
         human_bytes_per_sec(speed_bps),
         eta,
     )
+}
+
+/// Writes progress in-place on one terminal row, clearing leftovers from longer prior frames.
+fn print_progress_in_place(line: &str, prev_len: &mut usize) {
+    let current_len = line.chars().count();
+    let clear_tail = if *prev_len > current_len {
+        " ".repeat(*prev_len - current_len)
+    } else {
+        String::new()
+    };
+    print!("\r{line}{clear_tail}");
+    let _ = io::stdout().flush();
+    *prev_len = current_len;
 }
 
 /// Reads from `reader`, retrying automatically when interrupted by a signal.
@@ -607,6 +603,7 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         let started = Instant::now();
+        let mut prev_len = 0usize;
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -621,8 +618,7 @@ fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
                             let elapsed = started.elapsed().as_secs_f64().max(0.001);
                             let speed = snap.sent_bytes as f64 / elapsed;
                             let rendered = render_progress("RECV", snap, speed);
-                            print!("{rendered}");
-                            let _ = io::stdout().flush();
+                            print_progress_in_place(&rendered, &mut prev_len);
                         }
                     }
                 }
@@ -674,13 +670,13 @@ fn spawn_local_progress(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let started = Instant::now();
+        let mut prev_len = 0usize;
         loop {
             let snap = progress.snapshot();
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             let speed = snap.sent_bytes as f64 / elapsed;
             let rendered = render_progress(label, snap, speed);
-            print!("{rendered}");
-            let _ = io::stdout().flush();
+            print_progress_in_place(&rendered, &mut prev_len);
             if done.load(Ordering::Relaxed) {
                 println!();
                 break;
@@ -701,7 +697,6 @@ fn spawn_heartbeat_receiver(
         else {
             return;
         };
-        println!("[INFO] Heartbeat channel connected on port {p}.");
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         let mut last_seen = Instant::now();
@@ -724,7 +719,6 @@ fn spawn_heartbeat_receiver(
                 }
             }
         }
-        println!("[INFO] Heartbeat channel closed.");
     }))
 }
 
@@ -1777,12 +1771,20 @@ mod tests {
             files_total: 4,
         };
         let line = render_progress("SEND", snap, 1024.0 * 1024.0);
-        assert!(line.contains("overall"));
+        assert!(line.starts_with("[SEND]"));
+        assert!(line.contains("25%"));
         assert!(line.contains("file"));
         assert!(line.contains("files 1/4"));
         assert!(line.contains("MiB/s"));
         assert!(line.contains("ETA"));
         assert!(line.contains("1.00 MiB / 4.00 MiB"));
+    }
+
+    #[test]
+    fn print_progress_in_place_clears_leftover_chars() {
+        let mut prev_len = 20usize;
+        print_progress_in_place("[SEND] 10%", &mut prev_len);
+        assert_eq!(prev_len, "[SEND] 10%".chars().count());
     }
 
     struct InterruptOnceReader {

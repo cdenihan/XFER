@@ -26,6 +26,9 @@ pub(crate) fn send(
     } else if path.is_dir() {
         super::send_dir(receiver_ip, path, port, excludes, secure)
     } else {
-        Err(format!("Not a regular file or directory: {}", path.display()))
+        Err(format!(
+            "Not a regular file or directory: {}",
+            path.display()
+        ))
     }
 }
