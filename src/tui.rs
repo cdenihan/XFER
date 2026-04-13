@@ -66,7 +66,7 @@ pub(crate) fn run_tui() -> Result<(), String> {
             "1" => {
                 let out = ask("Output path (blank for current dir): ")?;
                 let port = ask_u16("Data port", super::DEFAULT_PORT)?;
-                let secure = ask_bool("Use secure mode (TOFU+SAS+E2E encryption)?", true)?;
+                let secure = ask_bool("Use secure mode (TOFU+SAS + Rust E2E encryption)?", true)?;
                 let force = ask_bool("Allow overwrite for file mode?", false)?;
                 let (ctrl, data, meta, status) = super::channel_ports(port);
                 println!(
@@ -84,7 +84,7 @@ pub(crate) fn run_tui() -> Result<(), String> {
                 let ip = ask("Receiver IP: ")?;
                 let path = PathBuf::from(ask("Path to file or directory: ")?);
                 let port = ask_u16("Data port", super::DEFAULT_PORT)?;
-                let secure = ask_bool("Use secure mode (TOFU+SAS+E2E encryption)?", true)?;
+                let secure = ask_bool("Use secure mode (TOFU+SAS + Rust E2E encryption)?", true)?;
                 let excludes = ask("Exclude patterns (comma separated, optional): ")?;
                 let excludes_vec: Vec<String> = excludes
                     .split(',')
