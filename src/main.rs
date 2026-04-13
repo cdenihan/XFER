@@ -538,6 +538,10 @@ fn render_progress(prefix: &str, snap: ProgressSnapshot, speed_bps: f64) -> Stri
     )
 }
 
+/// Reads from `reader`, retrying automatically when interrupted by a signal.
+///
+/// This keeps long-running transfer loops resilient to transient `EINTR`
+/// interruptions without treating them as fatal transfer failures.
 fn read_retry<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         match reader.read(buf) {
