@@ -19,6 +19,10 @@ use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+mod client;
+mod server;
+mod tui;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const APP_NAME: &str = "XFER";
@@ -27,6 +31,7 @@ const DEFAULT_PORT: u16 = 9000;
 const CHUNK: usize = 4 * 1024 * 1024;
 const SAS_CTRL_OFFSET: u16 = 1;
 const STATUS_OFFSET: u16 = 2;
+const HEARTBEAT_OFFSET: u16 = 3;
 const META_ACCEPT_BUDGET: Duration = Duration::from_secs(60);
 const SAS_ACCEPT_BUDGET: Duration = Duration::from_secs(120);
 
@@ -81,6 +86,8 @@ enum Commands {
         #[arg(long = "insecure", alias = "no-secure")]
         insecure: bool,
     },
+    /// Interactive TUI mode
+    Tui,
 }
 
 #[derive(Clone, Debug)]
@@ -110,42 +117,41 @@ fn run() -> Result<(), String> {
             port,
             force,
             insecure,
-        } => receive_auto(out, port, force, None, !insecure)?,
+        } => server::receive(out, port, force, None, !insecure)?,
         Commands::RecvFile {
             output,
             port,
             force,
             insecure,
-        } => receive_auto(Some(output), port, force, Some("file"), !insecure)?,
+        } => server::receive(Some(output), port, force, Some("file"), !insecure)?,
         Commands::RecvDir {
             output_dir,
             port,
             insecure,
-        } => receive_auto(Some(output_dir), port, false, Some("dir"), !insecure)?,
+        } => server::receive(Some(output_dir), port, false, Some("dir"), !insecure)?,
         Commands::Send {
             receiver_ip,
             path,
             port,
             excludes,
             insecure,
-        } => {
-            if !path.exists() {
-                return Err(format!("Path not found: {}", path.display()));
-            }
-            if path.is_file() {
-                send_file(&receiver_ip, &path, port, !insecure)?;
-            } else if path.is_dir() {
-                send_dir(&receiver_ip, &path, port, &excludes, !insecure)?;
-            } else {
-                return Err(format!("Not a regular file or directory: {}", path.display()));
-            }
-        }
+        } => client::send(&receiver_ip, &path, port, &excludes, !insecure)?,
+        Commands::Tui => tui::run_tui()?,
     }
 
     Ok(())
 }
 
-fn local_ips() -> Vec<String> {
+pub(crate) fn channel_ports(port: u16) -> (u16, u16, u16, u16) {
+    (
+        port.saturating_sub(SAS_CTRL_OFFSET),
+        port,
+        port.saturating_add(1),
+        port.saturating_add(2),
+    )
+}
+
+pub(crate) fn local_ips() -> Vec<String> {
     let mut ips: Vec<String> = Vec::new();
     if let Ok(host) = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -397,6 +403,10 @@ fn status_port(port: u16) -> Option<u16> {
     port.checked_add(STATUS_OFFSET)
 }
 
+fn heartbeat_port(port: u16) -> Option<u16> {
+    port.checked_add(HEARTBEAT_OFFSET)
+}
+
 fn spawn_status_receiver(port: u16) -> Option<std::thread::JoinHandle<()>> {
     let p = status_port(port)?;
     Some(std::thread::spawn(move || {
@@ -448,6 +458,60 @@ fn spawn_status_sender(
                 return;
             }
             std::thread::sleep(Duration::from_millis(500));
+        }
+    }))
+}
+
+fn spawn_heartbeat_receiver(port: u16, done: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+    let p = heartbeat_port(port)?;
+    Some(std::thread::spawn(move || {
+        let Ok(l) = listener(p) else { return };
+        let Ok((stream, _)) = accept_one(&l, Some(Instant::now() + Duration::from_secs(180))) else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let mut last_seen = Instant::now();
+        while !done.load(Ordering::Relaxed) {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    last_seen = Instant::now();
+                    let msg = line.trim();
+                    if !msg.is_empty() {
+                        println!("[HEARTBEAT] {msg}");
+                    }
+                }
+                Err(_) => {
+                    if last_seen.elapsed() > Duration::from_secs(10) {
+                        println!("[WARN] heartbeat timeout on port {p}");
+                        break;
+                    }
+                }
+            }
+        }
+    }))
+}
+
+fn spawn_heartbeat_sender(ip: String, port: u16, done: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+    let p = heartbeat_port(port)?;
+    Some(std::thread::spawn(move || {
+        let Ok(mut stream) = connect_with_retry(&ip, p, Duration::from_secs(30)) else {
+            return;
+        };
+        let mut seq: u64 = 0;
+        loop {
+            let payload = format!("seq={seq} ts={}", now_secs());
+            if stream.write_all(payload.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+                return;
+            }
+            if done.load(Ordering::Relaxed) {
+                let _ = stream.write_all(b"done=1\n");
+                return;
+            }
+            seq = seq.wrapping_add(1);
+            std::thread::sleep(Duration::from_secs(1));
         }
     }))
 }
@@ -895,7 +959,7 @@ fn send_meta_string(ip: &str, port: u16, payload: &str, session: Option<&Session
     Ok(())
 }
 
-fn receive_auto(
+pub(crate) fn receive_auto(
     out_path: Option<PathBuf>,
     port: u16,
     force: bool,
@@ -903,7 +967,9 @@ fn receive_auto(
     secure: bool,
 ) -> Result<(), String> {
     let session = if secure { Some(sas_receiver_handshake(port)?) } else { None };
+    let hb_done = Arc::new(AtomicBool::new(false));
     let status_handle = spawn_status_receiver(port);
+    let heartbeat_handle = spawn_heartbeat_receiver(port, hb_done.clone());
 
     println!("[INFO] Listening on data port {port} ...");
     let l = listener(port)?;
@@ -921,7 +987,11 @@ fn receive_auto(
         "dir" => receive_dir_stream(conn, out_path, port, session.as_ref()),
         _ => Err(format!("Unsupported mode: {mode}")),
     };
+    hb_done.store(true, Ordering::Relaxed);
     if let Some(h) = status_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = heartbeat_handle {
         let _ = h.join();
     }
     result
@@ -1133,7 +1203,7 @@ fn verify_manifest(manifest: &str, local_hashes: &HashMap<String, String>) -> Re
     }
 }
 
-fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), String> {
+pub(crate) fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), String> {
     let session = if secure { Some(sas_sender_handshake(ip, port)?) } else { None };
 
     let filename = path
@@ -1147,6 +1217,7 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
     let total = fs::metadata(path).map_err(|e| e.to_string())?.len();
     let status_count = Arc::new(AtomicU64::new(0));
     let status_done = Arc::new(AtomicBool::new(false));
+    let heartbeat_done = Arc::new(AtomicBool::new(false));
     let status_thread = spawn_status_sender(
         ip.to_string(),
         port,
@@ -1154,6 +1225,7 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
         Some(total),
         status_done.clone(),
     );
+    let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
 
     let mut hasher = Sha256::new();
     let mut f = File::open(path).map_err(|e| e.to_string())?;
@@ -1185,7 +1257,11 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
         }
     }
     status_done.store(true, Ordering::Relaxed);
+    heartbeat_done.store(true, Ordering::Relaxed);
     if let Some(h) = status_thread {
+        let _ = h.join();
+    }
+    if let Some(h) = heartbeat_thread {
         let _ = h.join();
     }
 
@@ -1196,7 +1272,7 @@ fn send_file(ip: &str, path: &Path, port: u16, secure: bool) -> Result<(), Strin
     Ok(())
 }
 
-fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool) -> Result<(), String> {
+pub(crate) fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool) -> Result<(), String> {
     let session = if secure { Some(sas_sender_handshake(ip, port)?) } else { None };
 
     let files = iter_files_with_sizes(path, excludes)?;
@@ -1212,6 +1288,7 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
     write_preface(&mut stream, "dir", &base)?;
     let status_count = Arc::new(AtomicU64::new(0));
     let status_done = Arc::new(AtomicBool::new(false));
+    let heartbeat_done = Arc::new(AtomicBool::new(false));
     let status_thread = spawn_status_sender(
         ip.to_string(),
         port,
@@ -1219,6 +1296,7 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
         Some(total_data),
         status_done.clone(),
     );
+    let heartbeat_thread = spawn_heartbeat_sender(ip.to_string(), port, heartbeat_done.clone());
 
     if let Some(sess) = session.as_ref() {
         let mut ew = EncryptWriter::new(stream, &sess.key);
@@ -1256,11 +1334,48 @@ fn send_dir(ip: &str, path: &Path, port: u16, excludes: &[String], secure: bool)
         tw.finish().map_err(|e| e.to_string())?;
     }
     status_done.store(true, Ordering::Relaxed);
+    heartbeat_done.store(true, Ordering::Relaxed);
     if let Some(h) = status_thread {
+        let _ = h.join();
+    }
+    if let Some(h) = heartbeat_thread {
         let _ = h.join();
     }
 
     send_meta_string(ip, port, &manifest, session.as_ref())?;
     println!("[ OK ] Manifest sent.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_filename_works() {
+        assert_eq!(sanitize_name("a/b/c.txt"), "c.txt");
+        assert_eq!(sanitize_name(""), "xfer-incoming.bin");
+    }
+
+    #[test]
+    fn channel_ports_mapping_is_stable() {
+        let (ctrl, data, meta, status) = channel_ports(9000);
+        assert_eq!(ctrl, 8999);
+        assert_eq!(data, 9000);
+        assert_eq!(meta, 9001);
+        assert_eq!(status, 9002);
+        assert_eq!(heartbeat_port(9000), Some(9003));
+    }
+
+    #[test]
+    fn manifest_verification_passes_and_fails() {
+        let mut hashes = HashMap::new();
+        hashes.insert("dir/file.txt".to_string(), "abc".to_string());
+
+        let ok = verify_manifest("abc  dir/file.txt\n", &hashes);
+        assert!(ok.is_ok());
+
+        let bad = verify_manifest("def  dir/file.txt\n", &hashes);
+        assert!(bad.is_err());
+    }
 }
