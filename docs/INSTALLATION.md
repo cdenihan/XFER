@@ -13,6 +13,30 @@ SHA-256 file before replacing anything, run the downloaded binary as a
 compatibility check, and install through a temporary file so a failed upgrade
 does not destroy the existing executable.
 
+## Updating an existing installation
+
+After installing an official release, update the executable currently being
+used by your shell:
+
+```console
+xfer update
+xfer update --version 2026.07.16.2
+```
+
+The command resolves the running executable, downloads the latest platform
+installer and its checksum, verifies SHA-256, and asks that installer to replace
+XFER in the same directory. On Windows, the command starts a helper that waits
+for the running `xfer.exe` process to exit before completing the replacement.
+Use `--version` to pin the installation to a specific published release.
+
+During transfers, current XFER releases exchange their release versions. When
+they differ, the older interactive CLI offers to update to the newer peer's
+exact release after the transfer completes. Non-interactive sessions print the
+command to run, while `--json` emits a `version_mismatch` event.
+
+`XFER_REPOSITORY` and `XFER_RELEASE_BASE_URL` apply to updates as well as initial
+installation. The target directory must be writable by the current user.
+
 ## Linux and macOS
 
 Install the latest release:
@@ -28,7 +52,7 @@ Pin a release or choose another destination:
 
 ```console
 curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh \
-  | sh -s -- --version v2026.07.16.42 --install-dir "$HOME/bin"
+  | sh -s -- --version v2026.07.16.2 --install-dir "$HOME/bin"
 ```
 
 Equivalent environment variables are `XFER_VERSION` and `XFER_INSTALL_DIR`.

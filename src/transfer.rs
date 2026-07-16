@@ -61,6 +61,7 @@ pub struct TransferSummary {
     pub file_count: u64,
     pub total_bytes: u64,
     pub peer: SocketAddr,
+    pub peer_version: Option<String>,
 }
 
 pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSummary> {
@@ -87,6 +88,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         total_bytes: plan.total_bytes,
         file_count: plan.file_count,
         entry_count: plan.entries.len() as u64,
+        release_version: Some(crate::VERSION.into()),
     };
     session.send_message(FrameKind::Offer, &offer)?;
     match session.receive_message::<Decision>(FrameKind::Decision)? {
@@ -173,6 +175,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         file_count: complete.file_count,
         total_bytes: complete.total_bytes,
         peer,
+        peer_version: complete.release_version,
     })
 }
 
@@ -410,6 +413,7 @@ fn receive_transfer(
             destination: destination.display().to_string(),
             file_count: files_done,
             total_bytes: transferred,
+            release_version: Some(crate::VERSION.into()),
         },
     )?;
     reporter.status(&format!(
@@ -421,6 +425,7 @@ fn receive_transfer(
         file_count: files_done,
         total_bytes: transferred,
         peer,
+        peer_version: offer.release_version,
     })
 }
 
@@ -443,6 +448,7 @@ fn validate_secure_token(secure: bool, token: Option<&str>) -> Result<()> {
 }
 
 fn validate_completion(complete: &Complete, files_done: u64, transferred: u64) -> Result<()> {
+    validate_peer_release_version(complete.release_version.as_deref())?;
     if complete.file_count != files_done || complete.total_bytes != transferred {
         return Err(XferError::security(
             "receiver completion totals did not match the sent transfer",
@@ -600,6 +606,7 @@ fn establish_server(
 
 fn validate_offer(offer: &Offer) -> Result<()> {
     validate_wire_name(&offer.root_name)?;
+    validate_peer_release_version(offer.release_version.as_deref())?;
     if offer.entry_count > 10_000_000 {
         return Err(XferError::protocol("entry count exceeds safety limit"));
     }
@@ -612,6 +619,21 @@ fn validate_offer(offer: &Offer) -> Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+fn validate_peer_release_version(version: Option<&str>) -> Result<()> {
+    let Some(version) = version else {
+        return Ok(());
+    };
+    if version.is_empty()
+        || version.len() > 64
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(XferError::protocol("peer sent an invalid release version"));
+    }
+    Ok(())
 }
 
 fn random_secret() -> Result<StaticSecret> {
@@ -1288,6 +1310,7 @@ mod tests {
                 total_bytes: 0,
                 file_count: 0,
                 entry_count: 1,
+                release_version: None,
             })
             .is_err()
         );
@@ -1298,6 +1321,7 @@ mod tests {
                 total_bytes: 0,
                 file_count: 2,
                 entry_count: 1,
+                release_version: None,
             })
             .is_err()
         );
@@ -1308,6 +1332,7 @@ mod tests {
                 total_bytes: 0,
                 file_count: 0,
                 entry_count: 10_000_001,
+                release_version: None,
             })
             .is_err()
         );
@@ -1327,6 +1352,8 @@ mod tests {
         );
         assert!(validate_secure_token(true, Some("")).is_err());
         assert!(validate_secure_token(true, Some("secret")).is_ok());
+        assert!(validate_peer_release_version(Some("2026.07.16.2")).is_ok());
+        assert!(validate_peer_release_version(Some("bad\u{1b}[2J")).is_err());
     }
 
     #[test]
@@ -1335,6 +1362,7 @@ mod tests {
             destination: "payload".into(),
             file_count: 2,
             total_bytes: 10,
+            release_version: None,
         };
         assert!(validate_completion(&complete, 2, 10).is_ok());
         assert!(validate_completion(&complete, 1, 10).is_err());

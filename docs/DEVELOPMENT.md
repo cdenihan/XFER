@@ -105,9 +105,12 @@ duplicate those runs; pushes to `main` validate the merged result. Superseded
 runs for the same pull request or ref are cancelled.
 
 Every push to `main` creates a release. The workflow generates a UTC version in
-the form `YYYY.MM.DD.<run-number>` and a matching
-`vYYYY.MM.DD.<run-number>` Git tag. The workflow run number makes releases
-unique when multiple commits land on the same day, including concurrent pushes.
+the form `YYYY.MM.DD.<daily-release-number>` and a matching
+`vYYYY.MM.DD.<daily-release-number>` Git tag. It inspects the existing tags for
+that UTC date and increments the highest suffix, so releases made on the same
+day are numbered `.1`, `.2`, `.3`, and so on. The workflow reserves the tag
+atomically before building to avoid duplicate numbers from concurrent pushes,
+and removes its unused reservation if the release fails.
 
 The generated version is passed to Cargo as `XFER_RELEASE_VERSION` and compiled
 into the binary. `xfer --version` and `xfer doctor` report that exact release

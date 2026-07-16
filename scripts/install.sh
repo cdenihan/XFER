@@ -13,7 +13,7 @@ Usage:
   install.sh [--version VERSION] [--install-dir DIRECTORY]
 
 Options:
-  --version VERSION        Release tag, such as v2026.07.16.42 (default: latest)
+  --version VERSION        Release tag, such as v2026.07.16.2 (default: latest)
   --install-dir DIRECTORY  Destination directory (default: $HOME/.local/bin)
   -h, --help               Show this help
 

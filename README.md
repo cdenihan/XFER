@@ -23,6 +23,7 @@ The v4 rewrite is a library-first Rust application with a
 - Optional shared token mixed into key derivation
 - Human progress, newline-delimited JSON events, and a live TUI
 - Peer-management, diagnostics, and shell-completion commands
+- A checksum-verified `xfer update` command that replaces the active installation
 - Native CI on Linux, macOS, and Windows plus cross-target checks
 
 ## Install
@@ -44,6 +45,12 @@ download the matching release binary; verify its SHA-256 file; and replace an
 existing installation atomically. See [docs/INSTALLATION.md](docs/INSTALLATION.md)
 for version pinning, install locations, PATH behavior, mirrors, and manual
 installation.
+
+After the first install, update that same executable in place:
+
+```console
+xfer update
+```
 
 ## Quick start
 
@@ -129,6 +136,23 @@ resolved targets remain inside the transfer root.
 ```console
 xfer receive --output ./downloads
 ```
+
+### Update
+
+```console
+xfer update
+xfer update --version 2026.07.16.2
+```
+
+The updater downloads the latest installer and its SHA-256 file, verifies the
+installer, and then uses it to replace the currently running XFER installation.
+On Windows, replacement finishes immediately after the current process exits.
+Installations in protected system directories may require reinstalling to a
+user-writable directory first.
+
+XFER also exchanges release versions during a transfer. If the versions differ,
+the older interactive CLI warns and offers to update to the peer's exact release.
+Non-interactive and JSON sessions report the mismatch without prompting.
 
 The receiver accepts one transfer, verifies it, writes it to the destination,
 and exits. If the destination name already exists, XFER chooses a numbered name

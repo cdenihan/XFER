@@ -33,5 +33,10 @@ All notable changes to XFER are documented here.
 - Extensive unit, CLI subprocess, installer, secure loopback, protocol
   rejection, filesystem-safety, and directory-transfer tests.
 - Native and cross-platform CI without duplicate push/PR runs.
-- Date-based release automation for every push to `main`, with a unique workflow
-  run suffix and the release version compiled into the CLI.
+- Date-based release automation for every push to `main`, with a sequential
+  per-day suffix and the release version compiled into the CLI.
+- A checksum-verifying `xfer update` command that replaces the currently
+  installed executable with the latest official release or a specifically
+  pinned release.
+- Compatible release-version exchange during transfers, with mismatch warnings
+  and an interactive update offer on the older CLI.

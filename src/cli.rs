@@ -1,4 +1,9 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{
+    cmp::Ordering,
+    io::{self, IsTerminal, Write},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::Context;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -13,7 +18,7 @@ use crate::{
     protocol::DEFAULT_PORT,
     reporter::CliReporter,
     transfer::{ReceiveOptions, SendOptions, human_bytes, receive, send},
-    tui,
+    tui, update,
 };
 
 #[derive(Debug, Parser)]
@@ -136,6 +141,13 @@ enum Command {
     /// Check local configuration and networking prerequisites.
     Doctor,
 
+    /// Replace the currently installed executable with an official release.
+    Update {
+        /// Release version to install, such as 2026.07.16.2.
+        #[arg(long, default_value = "latest")]
+        version: String,
+    },
+
     /// Generate shell completion scripts.
     Completions {
         /// Shell to generate a completion script for.
@@ -161,7 +173,6 @@ enum PeerCommand {
 
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let paths = Paths::discover(cli.config_dir.clone())?;
     match cli.command {
         Command::Send {
             host,
@@ -218,6 +229,7 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             reporter.finish();
             print_summary(&summary, cli.json, "sent");
+            handle_version_mismatch(&summary, cli.json)?;
         }
         Command::Receive {
             output,
@@ -244,6 +256,7 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             reporter.finish();
             print_summary(&summary, cli.json, "received");
+            handle_version_mismatch(&summary, cli.json)?;
         }
         Command::Tui => tui::run(cli.config_dir)?,
         Command::Ip => {
@@ -271,8 +284,25 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Peers { command } => handle_peers(command, &paths, cli.json)?,
-        Command::Doctor => doctor(&paths, cli.json)?,
+        Command::Peers { command } => {
+            let paths = Paths::discover(cli.config_dir)?;
+            handle_peers(command, &paths, cli.json)?;
+        }
+        Command::Doctor => {
+            let paths = Paths::discover(cli.config_dir)?;
+            doctor(&paths, cli.json)?;
+        }
+        Command::Update { version } => {
+            if !cli.json {
+                if version == "latest" {
+                    eprintln!("• checking for the latest XFER release");
+                } else {
+                    eprintln!("• installing XFER release {version}");
+                }
+            }
+            let summary = update::update_current(&version, cli.json)?;
+            print_update_summary(&summary, cli.json)?;
+        }
         Command::Completions { shell } => {
             generate(shell, &mut Cli::command(), "xfer", &mut io::stdout());
         }
@@ -403,6 +433,7 @@ fn print_summary(summary: &crate::transfer::TransferSummary, json: bool, action:
                 "file_count": summary.file_count,
                 "total_bytes": summary.total_bytes,
                 "peer": summary.peer,
+                "peer_version": summary.peer_version,
             })
         );
     } else {
@@ -414,6 +445,105 @@ fn print_summary(summary: &crate::transfer::TransferSummary, json: bool, action:
             summary.peer
         );
     }
+}
+
+fn handle_version_mismatch(
+    summary: &crate::transfer::TransferSummary,
+    json: bool,
+) -> anyhow::Result<()> {
+    let Some(peer_version) = summary.peer_version.as_deref() else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "version_unknown",
+                    "local_version": crate::VERSION,
+                    "peer_version": null,
+                })
+            );
+        } else {
+            eprintln!(
+                "WARNING: the peer did not report its XFER release version and is probably using an older release."
+            );
+            eprintln!("Run `xfer update` on the peer before the next transfer.");
+        }
+        return Ok(());
+    };
+    if peer_version == crate::VERSION {
+        return Ok(());
+    }
+
+    let ordering = update::compare_versions(crate::VERSION, peer_version);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "version_mismatch",
+                "local_version": crate::VERSION,
+                "peer_version": peer_version,
+                "local_is_older": ordering == Some(Ordering::Less),
+            })
+        );
+        return Ok(());
+    }
+
+    eprintln!(
+        "WARNING: this machine is using XFER {}, but the peer is using XFER {}.",
+        crate::VERSION,
+        peer_version
+    );
+    match ordering {
+        Some(Ordering::Less) => {
+            if !io::stdin().is_terminal() {
+                eprintln!(
+                    "Run `xfer update --version {peer_version}` to update this installation."
+                );
+                return Ok(());
+            }
+            eprint!("Update this installation to XFER {peer_version} now? [y/N] ");
+            io::stderr().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                let update = update::update_current(peer_version, false)?;
+                print_update_summary(&update, false)?;
+            } else {
+                eprintln!("Update skipped. Run `xfer update --version {peer_version}` when ready.");
+            }
+        }
+        Some(Ordering::Greater) => {
+            eprintln!(
+                "The peer is older. Its CLI will offer to update after the transfer; otherwise run `xfer update --version {}` on that machine.",
+                crate::VERSION
+            );
+        }
+        Some(Ordering::Equal) => {}
+        None => {
+            eprintln!(
+                "These version formats cannot be ordered. Run `xfer update` on both machines to align them."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_update_summary(summary: &update::UpdateSummary, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(summary)?);
+    } else if let Some(installed_version) = &summary.installed_version {
+        println!(
+            "Updated XFER {} → {} at {}",
+            summary.previous_version,
+            installed_version,
+            summary.executable.display()
+        );
+    } else {
+        println!(
+            "Update scheduled for {}; XFER will be replaced after this process exits.",
+            summary.executable.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

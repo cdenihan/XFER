@@ -71,6 +71,8 @@ pub struct Offer {
     pub total_bytes: u64,
     pub file_count: u64,
     pub entry_count: u64,
+    #[serde(default)]
+    pub release_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -103,6 +105,8 @@ pub struct Complete {
     pub destination: String,
     pub file_count: u64,
     pub total_bytes: u64,
+    #[serde(default)]
+    pub release_version: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -576,5 +580,26 @@ mod tests {
         let mut unknown_flags = secure_preface;
         unknown_flags[6] = 0x80;
         assert!(server_negotiate(&mut Cursor::new(unknown_flags), false).is_err());
+    }
+
+    #[test]
+    fn release_metadata_is_backward_compatible() {
+        let legacy_offer = br#"{
+            "root_name": "payload",
+            "kind": "File",
+            "total_bytes": 1,
+            "file_count": 1,
+            "entry_count": 1
+        }"#;
+        let offer: Offer = serde_json::from_slice(legacy_offer).unwrap();
+        assert_eq!(offer.release_version, None);
+
+        let legacy_complete = br#"{
+            "destination": "payload",
+            "file_count": 1,
+            "total_bytes": 1
+        }"#;
+        let complete: Complete = serde_json::from_slice(legacy_complete).unwrap();
+        assert_eq!(complete.release_version, None);
     }
 }

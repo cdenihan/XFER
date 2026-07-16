@@ -16,11 +16,32 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Generate date-based version
+      - uses: actions/checkout@v7.0.0
+
+      - name: Generate daily release version
         id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          release_version="$(date -u +'%Y.%m.%d').${GITHUB_RUN_NUMBER}"
+          release_date="$(date -u +'%Y.%m.%d')"
+          for attempt in {1..10}; do
+            release_version="$(
+              gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${release_date}." \
+                --jq '.[].ref' |
+                sh scripts/next-release-version.sh "$release_date"
+            )"
+            if gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/v${release_version}" \
+              -f "sha=${GITHUB_SHA}" >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" == "10" ]]; then
+              echo "Could not reserve a release number after $attempt attempts." >&2
+              exit 1
+            fi
+          done
           echo "version=${release_version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${release_version}" >> "$GITHUB_OUTPUT"
           echo "Release version: ${release_version}"
@@ -148,6 +169,33 @@ jobs:
         shell: bash
         run: |
           gh release create "$RELEASE_TAG" dist/* \
-            --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "XFER $RELEASE_VERSION" \
             --generate-notes
+
+  cleanup_failed_tag:
+    name: Clean up failed release reservation
+    if: ${{ always() && needs.publish.result != 'success' }}
+    needs:
+      - release_metadata
+      - build
+      - publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete this run's unused reserved tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+        shell: bash
+        run: |
+          if [[ -z "$RELEASE_TAG" ]] || gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            exit 0
+          fi
+          reserved_sha="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '.object.sha' 2>/dev/null || true
+          )"
+          if [[ "$reserved_sha" == "$GITHUB_SHA" ]]; then
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}"
+          fi

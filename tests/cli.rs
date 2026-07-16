@@ -8,6 +8,8 @@ use std::{
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+#[cfg(not(windows))]
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 #[test]
@@ -20,6 +22,7 @@ fn help_lists_primary_workflows() {
         .stdout(predicate::str::contains("send"))
         .stdout(predicate::str::contains("receive"))
         .stdout(predicate::str::contains("discover"))
+        .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("tui"));
 }
 
@@ -97,6 +100,17 @@ fn receive_help_documents_discovery_opt_out() {
         .success()
         .stdout(predicate::str::contains("--no-discovery"))
         .stdout(predicate::str::contains("local network"));
+}
+
+#[test]
+fn update_help_documents_release_pinning() {
+    let mut command = Command::cargo_bin("xfer").unwrap();
+    command
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--version"))
+        .stdout(predicate::str::contains("2026.07.16.2"));
 }
 
 #[test]
@@ -300,6 +314,56 @@ fn completion_generation_produces_shell_source() {
         .stdout(predicate::str::contains("_xfer"));
 }
 
+#[cfg(not(windows))]
+#[test]
+fn update_pins_the_running_installation_to_a_verified_release() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let release = directory.path().join("release");
+    let download = release.join("latest/download");
+    let pinned_download = release.join(format!("download/v{}", xfer::VERSION));
+    let install_directory = directory.path().join("bin");
+    fs::create_dir_all(&download).unwrap();
+    fs::create_dir_all(&pinned_download).unwrap();
+    fs::create_dir(&install_directory).unwrap();
+
+    let installer = download.join("install.sh");
+    fs::write(&installer, include_bytes!("../scripts/install.sh")).unwrap();
+    write_checksum(&installer);
+
+    let source_binary = std::path::PathBuf::from(Command::cargo_bin("xfer").unwrap().get_program());
+    let installed_binary = install_directory.join("xfer");
+    fs::copy(&source_binary, &installed_binary).unwrap();
+    fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let artifact = pinned_download.join(current_unix_artifact());
+    fs::copy(&source_binary, &artifact).unwrap();
+    fs::set_permissions(&artifact, fs::Permissions::from_mode(0o755)).unwrap();
+    write_checksum(&artifact);
+
+    let output = ProcessCommand::new(&installed_binary)
+        .args(["--json", "update", "--version", xfer::VERSION])
+        .env(
+            "XFER_RELEASE_BASE_URL",
+            format!("file://{}", release.display()),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "updated");
+    assert_eq!(
+        summary["executable"],
+        installed_binary.display().to_string()
+    );
+    assert_eq!(summary["installed_version"], xfer::VERSION);
+}
+
 #[test]
 fn cli_insecure_transfer_round_trips_between_processes() {
     let directory = tempdir().unwrap();
@@ -387,4 +451,32 @@ fn wait_for_log(path: &std::path::Path, needle: &str) {
         path.display(),
         fs::read_to_string(path).unwrap_or_default()
     );
+}
+
+#[cfg(not(windows))]
+fn current_unix_artifact() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "x86_64") => "xfer-macos-x86_64",
+        ("macos", "aarch64") => "xfer-macos-aarch64",
+        ("linux", "x86_64") => "xfer-linux-x86_64",
+        ("linux", "aarch64") => "xfer-linux-aarch64",
+        combination => panic!("unsupported test platform: {combination:?}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn write_checksum(path: &std::path::Path) {
+    let digest = hex::encode(Sha256::digest(fs::read(path).unwrap()));
+    let checksum = path.with_file_name(format!(
+        "{}.sha256",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(
+        checksum,
+        format!(
+            "{digest}  {}\n",
+            path.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
 }
