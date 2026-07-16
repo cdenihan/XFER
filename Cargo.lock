@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "xfer"
-version = "4.0.0"
+version = "2026.7.16-7"
 dependencies = [
  "anyhow",
  "assert_cmd",
