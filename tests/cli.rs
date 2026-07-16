@@ -41,16 +41,13 @@ fn dry_run_reports_a_transfer_without_connecting() {
 }
 
 #[test]
-fn version_matches_package_metadata() {
+fn version_matches_compiled_release_version() {
     let mut command = Command::cargo_bin("xfer").unwrap();
     command
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::eq(format!(
-            "xfer {}\n",
-            env!("CARGO_PKG_VERSION")
-        )));
+        .stdout(predicate::eq(format!("xfer {}\n", xfer::VERSION)));
 }
 
 #[test]
@@ -118,7 +115,7 @@ fn doctor_json_reports_identity_network_and_discovery() {
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], "ok");
-    assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["version"], xfer::VERSION);
     assert_eq!(value["default_port"], 9_000);
     assert!(
         value["identity_fingerprint"]

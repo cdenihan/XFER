@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug, Parser)]
 #[command(
     name = "xfer",
-    version,
+    version = crate::VERSION,
     about = "Secure file and directory transfer for local networks",
     long_about = "XFER sends files and directories directly between machines over TCP. Transfers use authenticated encryption and remembered peer identities by default."
 )]
@@ -355,7 +355,7 @@ fn doctor(paths: &Paths, json: bool) -> anyhow::Result<()> {
     let identity_fingerprint = display_fingerprint(&fingerprint(identity.public().as_bytes()));
     let addresses = net::local_addresses().context("could not enumerate network interfaces")?;
     let report = serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "config_directory": paths.root(),
         "identity_fingerprint": identity_fingerprint,
         "addresses": addresses,
@@ -366,7 +366,7 @@ fn doctor(paths: &Paths, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{report}");
     } else {
-        println!("XFER {}: OK", env!("CARGO_PKG_VERSION"));
+        println!("XFER {}: OK", crate::VERSION);
         println!("Configuration: {}", paths.root().display());
         println!("Identity: {identity_fingerprint}");
         println!("Default port: {DEFAULT_PORT}");

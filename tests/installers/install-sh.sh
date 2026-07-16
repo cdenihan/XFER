@@ -23,8 +23,8 @@ assert_equal "xfer-linux-aarch64" "$(artifact_for Linux aarch64 gnu)" "Linux ARM
 assert_equal "xfer-linux-aarch64-musl" "$(artifact_for Linux aarch64 musl)" "Linux ARM64 musl"
 assert_equal "xfer-macos-x86_64" "$(artifact_for Darwin x86_64 gnu)" "macOS Intel"
 assert_equal "xfer-macos-aarch64" "$(artifact_for Darwin aarch64 gnu)" "macOS Apple Silicon"
-assert_equal "v4.0.0" "$(normalize_version 4.0.0)" "version normalization"
-assert_equal "v4.0.0" "$(normalize_version v4.0.0)" "tag preservation"
+assert_equal "v2026.07.16.42" "$(normalize_version 2026.07.16.42)" "version normalization"
+assert_equal "v2026.07.16.42" "$(normalize_version v2026.07.16.42)" "tag preservation"
 
 if artifact_for FreeBSD x86_64 gnu >/dev/null 2>&1; then
     printf '%s\n' "FAIL: unsupported OS was accepted" >&2

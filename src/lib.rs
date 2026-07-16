@@ -9,5 +9,7 @@ pub mod protocol;
 pub mod reporter;
 pub mod transfer;
 pub mod tui;
+pub mod version;
 
 pub use cli::run;
+pub use version::VERSION;

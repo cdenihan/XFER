@@ -104,7 +104,17 @@ and cross-target `cargo check` using current stable Rust. Branch pushes do not
 duplicate those runs; pushes to `main` validate the merged result. Superseded
 runs for the same pull request or ref are cancelled.
 
-Tags matching `v*` build raw release binaries and SHA-256 files for:
+Every push to `main` creates a release. The workflow generates a UTC version in
+the form `YYYY.MM.DD.<run-number>` and a matching
+`vYYYY.MM.DD.<run-number>` Git tag. The workflow run number makes releases
+unique when multiple commits land on the same day, including concurrent pushes.
+
+The generated version is passed to Cargo as `XFER_RELEASE_VERSION` and compiled
+into the binary. `xfer --version` and `xfer doctor` report that exact release
+version. Local builds without the variable continue to report the package
+version from `Cargo.toml`.
+
+Each release builds raw binaries and SHA-256 files for:
 
 - Linux x86_64 and ARM64, GNU and musl;
 - macOS x86_64 and Apple Silicon;

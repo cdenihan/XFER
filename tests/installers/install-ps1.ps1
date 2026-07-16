@@ -14,8 +14,12 @@ function Assert-Equal {
 
 Assert-Equal "xfer-windows-x86_64.exe" (Get-XferArtifact "AMD64") "Windows x86-64"
 Assert-Equal "xfer-windows-aarch64.exe" (Get-XferArtifact "ARM64") "Windows ARM64"
-Assert-Equal "v4.0.0" (Get-XferNormalizedVersion "4.0.0") "version normalization"
-Assert-Equal "v4.0.0" (Get-XferNormalizedVersion "v4.0.0") "tag preservation"
+Assert-Equal "v2026.07.16.42" (
+    Get-XferNormalizedVersion "2026.07.16.42"
+) "version normalization"
+Assert-Equal "v2026.07.16.42" (
+    Get-XferNormalizedVersion "v2026.07.16.42"
+) "tag preservation"
 
 $unsupported = $false
 try {

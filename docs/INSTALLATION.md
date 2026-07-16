@@ -28,7 +28,7 @@ Pin a release or choose another destination:
 
 ```console
 curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh \
-  | sh -s -- --version v4.0.0 --install-dir "$HOME/bin"
+  | sh -s -- --version v2026.07.16.42 --install-dir "$HOME/bin"
 ```
 
 Equivalent environment variables are `XFER_VERSION` and `XFER_INSTALL_DIR`.
@@ -52,7 +52,7 @@ To pin a version or suppress the PATH update, save and invoke the script:
 ```powershell
 $installer = Join-Path $env:TEMP "install-xfer.ps1"
 irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 -OutFile $installer
-& $installer -Version v4.0.0 -InstallDir "$HOME\bin" -NoModifyPath
+& $installer -Version v2026.07.16.42 -InstallDir "$HOME\bin" -NoModifyPath
 ```
 
 Equivalent environment variables are `XFER_VERSION` and `XFER_INSTALL_DIR`.

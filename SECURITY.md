@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes are made on the latest v4 release line.
+Security fixes are made in the latest date-based release.
 
 ## Reporting a vulnerability
 

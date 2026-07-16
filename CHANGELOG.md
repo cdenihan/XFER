@@ -2,7 +2,7 @@
 
 All notable changes to XFER are documented here.
 
-## 4.0.0 - Unreleased
+## Unreleased
 
 ### Changed
 
@@ -32,5 +32,6 @@ All notable changes to XFER are documented here.
   across every supported x86_64 and ARM64 release target.
 - Extensive unit, CLI subprocess, installer, secure loopback, protocol
   rejection, filesystem-safety, and directory-transfer tests.
-- Native and cross-platform CI without duplicate push/PR runs, plus tag-driven
-  release automation.
+- Native and cross-platform CI without duplicate push/PR runs.
+- Date-based release automation for every push to `main`, with a unique workflow
+  run suffix and the release version compiled into the CLI.

@@ -2,34 +2,34 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  validate-release:
-    name: Validate release tag
+  release_metadata:
+    name: Generate release version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Match tag to crate version
+      - name: Generate date-based version
+        id: release
         shell: bash
         run: |
-          crate_version="$(
-            cargo metadata --locked --no-deps --format-version 1 \
-              | jq -r '.packages[] | select(.name == "xfer") | .version'
-          )"
-          if [[ "$GITHUB_REF_NAME" != "v${crate_version}" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match crate version v${crate_version}" >&2
-            exit 1
-          fi
+          release_version="$(date -u +'%Y.%m.%d').${GITHUB_RUN_NUMBER}"
+          echo "version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${release_version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${release_version}"
 
   build:
     name: Build ${{ matrix.target }}
-    needs: validate-release
+    needs: release_metadata
+    env:
+      XFER_RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +88,17 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Verify compiled release version
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          reported_version="$("target/${{ matrix.target }}/release/${{ matrix.binary }}" --version)"
+          expected_version="xfer ${XFER_RELEASE_VERSION}"
+          if [[ "$reported_version" != "$expected_version" ]]; then
+            echo "Expected '$expected_version', got '$reported_version'" >&2
+            exit 1
+          fi
+
       - name: Prepare artifact
         shell: bash
         run: |
@@ -106,7 +117,9 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs:
+      - release_metadata
+      - build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
@@ -127,7 +140,14 @@ jobs:
             openssl dgst -sha256 -r install.ps1 > install.ps1.sha256
           )
 
-      - uses: softprops/action-gh-release@v3.0.2
-        with:
-          generate_release_notes: true
-          files: dist/*
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "XFER $RELEASE_VERSION" \
+            --generate-notes
