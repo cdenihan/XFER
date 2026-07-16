@@ -1,6 +1,7 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io::{self, Stdout},
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc,
@@ -25,7 +26,9 @@ use ratatui::{
 };
 
 use crate::{
+    discovery::{self, Browser, DiscoveredPeer},
     error::{Result, XferError},
+    net,
     protocol::DEFAULT_PORT,
     reporter::{Progress, Reporter, TrustPrompt},
     transfer::{ReceiveOptions, SendOptions, TransferSummary, receive, send},
@@ -106,6 +109,7 @@ struct Form {
     focus: usize,
     secure: bool,
     option: bool,
+    discoverable: bool,
 }
 
 impl Form {
@@ -121,6 +125,7 @@ impl Form {
             focus: 0,
             secure: true,
             option: false,
+            discoverable: true,
         }
     }
 
@@ -136,6 +141,7 @@ impl Form {
             focus: 0,
             secure: true,
             option: false,
+            discoverable: true,
         }
     }
 
@@ -150,6 +156,11 @@ impl Form {
             ],
         }
     }
+}
+
+struct SeenPeer {
+    peer: DiscoveredPeer,
+    last_seen: Instant,
 }
 
 enum WorkerEvent {
@@ -204,6 +215,12 @@ struct App {
     progress: Option<Progress>,
     pending_trust: Option<(TrustPrompt, SyncSender<bool>)>,
     finished: bool,
+    local_addresses: Vec<IpAddr>,
+    address_error: Option<String>,
+    browser: Option<Browser>,
+    discovery_error: Option<String>,
+    peers: BTreeMap<SocketAddr, SeenPeer>,
+    peer_selection: usize,
 }
 
 impl App {
@@ -212,6 +229,14 @@ impl App {
         worker_tx: Sender<WorkerEvent>,
         worker_rx: Receiver<WorkerEvent>,
     ) -> Self {
+        let (local_addresses, address_error) = match net::local_addresses() {
+            Ok(addresses) => (addresses, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        let (browser, discovery_error) = match Browser::start() {
+            Ok(browser) => (Some(browser), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         Self {
             screen: Screen::Home,
             home_selection: 0,
@@ -223,6 +248,12 @@ impl App {
             progress: None,
             pending_trust: None,
             finished: false,
+            local_addresses,
+            address_error,
+            browser,
+            discovery_error,
+            peers: BTreeMap::new(),
+            peer_selection: 0,
         }
     }
 
@@ -265,15 +296,37 @@ impl App {
             },
             Screen::Form => match key.code {
                 KeyCode::Esc => self.screen = Screen::Home,
-                KeyCode::Tab | KeyCode::Down => {
+                KeyCode::Tab => {
                     self.form.focus = (self.form.focus + 1) % self.form.values.len();
                 }
-                KeyCode::BackTab | KeyCode::Up => {
+                KeyCode::Down => {
+                    if self.peer_navigation_active() {
+                        self.peer_selection =
+                            (self.peer_selection + 1).min(self.peers.len().saturating_sub(1));
+                    } else {
+                        self.form.focus = (self.form.focus + 1) % self.form.values.len();
+                    }
+                }
+                KeyCode::BackTab => {
                     self.form.focus = self
                         .form
                         .focus
                         .checked_sub(1)
                         .unwrap_or(self.form.values.len() - 1);
+                }
+                KeyCode::Up => {
+                    if self.peer_navigation_active() {
+                        self.peer_selection = self.peer_selection.saturating_sub(1);
+                    } else {
+                        self.form.focus = self
+                            .form
+                            .focus
+                            .checked_sub(1)
+                            .unwrap_or(self.form.values.len() - 1);
+                    }
+                }
+                KeyCode::Enter if self.form.mode == Mode::Send => {
+                    self.select_discovered_peer();
                 }
                 KeyCode::Backspace => {
                     self.form.values[self.form.focus].pop();
@@ -281,6 +334,10 @@ impl App {
                 KeyCode::F(2) => self.start_transfer()?,
                 KeyCode::F(3) => self.form.secure = !self.form.secure,
                 KeyCode::F(4) => self.form.option = !self.form.option,
+                KeyCode::F(5) => match self.form.mode {
+                    Mode::Send => self.select_discovered_peer(),
+                    Mode::Receive => self.form.discoverable = !self.form.discoverable,
+                },
                 KeyCode::Char(character) => {
                     self.form.values[self.form.focus].push(character);
                 }
@@ -309,6 +366,7 @@ impl App {
         let values = self.form.values.clone();
         let secure = self.form.secure;
         let option = self.form.option;
+        let discoverable = self.form.discoverable;
         let mode = self.form.mode;
         self.logs.clear();
         self.progress = None;
@@ -337,6 +395,7 @@ impl App {
                         bind: values[1].clone(),
                         port,
                         overwrite: option,
+                        discoverable,
                         secure,
                         token: nonempty(values[3].clone()),
                         config_dir,
@@ -352,6 +411,7 @@ impl App {
     }
 
     fn drain_worker_events(&mut self) {
+        self.drain_discovery();
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::Status(message) => self.push_log(message),
@@ -374,6 +434,38 @@ impl App {
                     self.finished = true;
                 }
             }
+        }
+    }
+
+    fn drain_discovery(&mut self) {
+        while let Some(peer) = self.browser.as_ref().and_then(Browser::try_recv) {
+            self.peers.insert(
+                peer.address,
+                SeenPeer {
+                    peer,
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+        let now = Instant::now();
+        self.peers
+            .retain(|_, peer| now.saturating_duration_since(peer.last_seen) <= discovery::PEER_TTL);
+        self.peer_selection = self.peer_selection.min(self.peers.len().saturating_sub(1));
+    }
+
+    fn peer_navigation_active(&self) -> bool {
+        self.form.mode == Mode::Send && self.form.focus == 0 && !self.peers.is_empty()
+    }
+
+    fn select_discovered_peer(&mut self) {
+        let address = self
+            .peers
+            .values()
+            .nth(self.peer_selection)
+            .map(|seen| seen.peer.address);
+        if let Some(address) = address {
+            self.form.values[0] = address.ip().to_string();
+            self.form.values[2] = address.port().to_string();
         }
     }
 
@@ -416,7 +508,12 @@ impl App {
         }
         let help = match self.screen {
             Screen::Home => "↑/↓ select  Enter open  q quit",
-            Screen::Form => "Tab field  F2 start  F3 security  F4 option  Esc back",
+            Screen::Form if self.form.mode == Mode::Send => {
+                "Tab field  ↑/↓ receiver  Enter/F5 choose  F2 start  F3 security  F4 trust"
+            }
+            Screen::Form => {
+                "Tab field  F2 start  F3 security  F4 overwrite  F5 discovery  Esc back"
+            }
             Screen::Running if self.finished => "Enter, Esc, or q to close",
             Screen::Running => "Transfer in progress",
         };
@@ -460,16 +557,35 @@ impl App {
 
     fn draw_form(&self, frame: &mut Frame<'_>, area: Rect) {
         let labels = self.form.labels();
+        let (max_height, constraints) = match self.form.mode {
+            Mode::Send => (
+                26,
+                vec![
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Min(4),
+                ],
+            ),
+            Mode::Receive => (
+                24,
+                vec![
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Min(4),
+                ],
+            ),
+        };
+        let height = area.height.min(max_height);
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(centered(area, 78, 17));
+            .constraints(constraints)
+            .split(centered(area, 82, height));
         for (index, value) in self.form.values.iter().enumerate() {
             let style = if index == self.form.focus {
                 Style::default().fg(Color::Cyan)
@@ -498,9 +614,10 @@ impl App {
                 on_off(self.form.option)
             ),
             Mode::Receive => format!(
-                "Security: {}    Overwrite: {}",
+                "Security: {}    Overwrite: {}    LAN discovery: {}",
                 on_off(self.form.secure),
-                on_off(self.form.option)
+                on_off(self.form.option),
+                on_off(self.form.discoverable)
             ),
         };
         frame.render_widget(
@@ -509,6 +626,100 @@ impl App {
                 .block(Block::default().borders(Borders::ALL)),
             rows[4],
         );
+        match self.form.mode {
+            Mode::Send => self.draw_discovered_peers(frame, rows[5]),
+            Mode::Receive => self.draw_receiver_addresses(frame, rows[5]),
+        }
+    }
+
+    fn draw_discovered_peers(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .title(format!(" Nearby receivers ({}) ", self.peers.len()))
+            .borders(Borders::ALL);
+        if self.peers.is_empty() {
+            let message = self.discovery_error.as_ref().map_or_else(
+                || {
+                    "Listening for XFER receivers on this LAN… Start Receive on another machine. XFER does not scan addresses or ports."
+                        .to_string()
+                },
+                |error| {
+                    format!(
+                        "Automatic discovery is unavailable ({error}). Enter the receiver IP manually."
+                    )
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(message)
+                    .wrap(Wrap { trim: true })
+                    .block(block),
+                area,
+            );
+            return;
+        }
+
+        let visible_rows = usize::from(area.height.saturating_sub(2)).max(1);
+        let start = self
+            .peer_selection
+            .saturating_add(1)
+            .saturating_sub(visible_rows);
+        let items = self
+            .peers
+            .values()
+            .enumerate()
+            .skip(start)
+            .take(visible_rows)
+            .map(|(index, seen)| {
+                let selected = index == self.peer_selection;
+                let prefix = if selected { "›" } else { " " };
+                let security = if seen.peer.secure {
+                    "secure"
+                } else {
+                    "insecure"
+                };
+                ListItem::new(format!(
+                    "{prefix} {}  {}  [{security}]",
+                    seen.peer.name, seen.peer.address
+                ))
+                .style(if selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(List::new(items).block(block), area);
+    }
+
+    fn draw_receiver_addresses(&self, frame: &mut Frame<'_>, area: Rect) {
+        let endpoints = self.receiver_endpoints();
+        let lines = if endpoints.is_empty() {
+            vec![Line::from(self.address_error.as_ref().map_or_else(
+                || "No non-loopback address detected; loopback still works.".into(),
+                |error| format!("Could not enumerate local addresses: {error}"),
+            ))]
+        } else {
+            summarize_endpoints(&endpoints)
+        };
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .title(" Receiver addresses ")
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+    }
+
+    fn receiver_endpoints(&self) -> Vec<SocketAddr> {
+        let Ok(port) = self.form.values[2].parse::<u16>() else {
+            return Vec::new();
+        };
+        let Ok(bind) = self.form.values[1].parse::<IpAddr>() else {
+            return Vec::new();
+        };
+        net::endpoints_for_bind(bind, port, &self.local_addresses)
     }
 
     fn draw_running(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -618,4 +829,99 @@ fn nonempty(value: String) -> Option<String> {
 
 fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
+}
+
+fn summarize_endpoints(endpoints: &[SocketAddr]) -> Vec<Line<'static>> {
+    let ipv4 = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.is_ipv4())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let ipv6 = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.is_ipv6())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    if !ipv4.is_empty() {
+        lines.push(Line::from(format!(
+            "IPv4: {}{}",
+            ipv4.iter().take(2).cloned().collect::<Vec<_>>().join("  "),
+            more_count(ipv4.len(), 2)
+        )));
+    }
+    if !ipv6.is_empty() {
+        lines.push(Line::from(format!(
+            "IPv6: {}{}",
+            ipv6[0],
+            more_count(ipv6.len(), 1)
+        )));
+    }
+    lines
+}
+
+fn more_count(total: usize, shown: usize) -> String {
+    if total > shown {
+        format!("  (+{} more; xfer ip)", total - shown)
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forms_start_with_secure_production_defaults() {
+        let send = Form::send();
+        assert!(send.secure);
+        assert!(send.discoverable);
+        assert!(!send.option);
+        assert_eq!(send.values[2], DEFAULT_PORT.to_string());
+
+        let receive = Form::receive();
+        assert!(receive.secure);
+        assert!(receive.discoverable);
+        assert!(!receive.option);
+        assert_eq!(receive.values[1], "::");
+    }
+
+    #[test]
+    fn receiver_endpoint_summary_groups_families_and_limits_output() {
+        let endpoints = vec![
+            "192.168.1.20:9000".parse().unwrap(),
+            "10.0.0.2:9000".parse().unwrap(),
+            "172.16.0.2:9000".parse().unwrap(),
+            "[2001:db8::1]:9000".parse().unwrap(),
+            "[2001:db8::2]:9000".parse().unwrap(),
+        ];
+        let rendered = summarize_endpoints(&endpoints)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("IPv4:"));
+        assert!(rendered[0].contains("+1 more"));
+        assert!(rendered[1].contains("IPv6:"));
+        assert!(rendered[1].contains("+1 more"));
+    }
+
+    #[test]
+    fn centered_rectangle_never_exceeds_available_area() {
+        let area = Rect::new(0, 0, 40, 10);
+        let result = centered(area, 80, 24);
+        assert!(result.width <= area.width);
+        assert!(result.height <= area.height);
+    }
+
+    #[test]
+    fn helper_values_handle_empty_and_nonempty_inputs() {
+        assert_eq!(nonempty(String::new()), None);
+        assert_eq!(nonempty("token".into()), Some("token".into()));
+        assert_eq!(on_off(true), "on");
+        assert_eq!(on_off(false), "off");
+        assert_eq!(more_count(2, 2), "");
+        assert_eq!(more_count(4, 2), "  (+2 more; xfer ip)");
+    }
 }

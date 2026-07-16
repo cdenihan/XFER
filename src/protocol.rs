@@ -127,6 +127,7 @@ pub struct RecordStream<S> {
     stream: S,
     send_key: Option<DirectionalKey>,
     receive_key: Option<DirectionalKey>,
+    send_buffer: Vec<u8>,
     send_sequence: u64,
     receive_sequence: u64,
 }
@@ -146,6 +147,7 @@ impl<S: Read + Write> RecordStream<S> {
             stream,
             send_key,
             receive_key,
+            send_buffer: Vec::new(),
             send_sequence: 0,
             receive_sequence: 0,
         }
@@ -189,13 +191,19 @@ impl<S: Read + Write> RecordStream<S> {
             self.send_sequence,
             payload_len,
         )?;
-        let payload = if let Some(key) = &self.send_key {
-            key.seal(self.send_sequence, &header, plaintext)?
+        if let Some(key) = &self.send_key {
+            key.seal_into(
+                self.send_sequence,
+                &header,
+                plaintext,
+                &mut self.send_buffer,
+            )?;
+            self.stream.write_all(&header)?;
+            self.stream.write_all(&self.send_buffer)?;
         } else {
-            plaintext.to_vec()
-        };
-        self.stream.write_all(&header)?;
-        self.stream.write_all(&payload)?;
+            self.stream.write_all(&header)?;
+            self.stream.write_all(plaintext)?;
+        }
         self.stream.flush()?;
         self.send_sequence = self
             .send_sequence
@@ -205,6 +213,12 @@ impl<S: Read + Write> RecordStream<S> {
     }
 
     pub fn receive_frame(&mut self) -> Result<(FrameKind, Vec<u8>)> {
+        let mut payload = Vec::new();
+        let kind = self.receive_frame_into(&mut payload)?;
+        Ok((kind, payload))
+    }
+
+    pub fn receive_frame_into(&mut self, payload: &mut Vec<u8>) -> Result<FrameKind> {
         let mut header = [0_u8; HEADER_LEN];
         self.stream.read_exact(&mut header)?;
         if &header[..4] != RECORD_MAGIC {
@@ -218,6 +232,11 @@ impl<S: Read + Write> RecordStream<S> {
         }
         let kind = FrameKind::try_from(header[5])?;
         let flags = u16::from_be_bytes([header[6], header[7]]);
+        if flags & !RECORD_FLAG_ENCRYPTED != 0 {
+            return Err(XferError::protocol(format!(
+                "record contains unsupported flags: {flags:#06x}"
+            )));
+        }
         let sequence = u64::from_be_bytes([
             header[8], header[9], header[10], header[11], header[12], header[13], header[14],
             header[15],
@@ -241,18 +260,17 @@ impl<S: Read + Write> RecordStream<S> {
             ));
         }
 
-        let mut payload = vec![0_u8; length];
-        self.stream.read_exact(&mut payload)?;
-        let plaintext = if let Some(key) = &self.receive_key {
-            key.open(sequence, &header, &payload)?
-        } else {
-            payload
-        };
+        payload.clear();
+        payload.resize(length, 0);
+        self.stream.read_exact(payload)?;
+        if let Some(key) = &self.receive_key {
+            key.open_in_place(sequence, &header, payload)?;
+        }
         self.receive_sequence = self
             .receive_sequence
             .checked_add(1)
             .ok_or_else(|| XferError::protocol("receive sequence exhausted"))?;
-        Ok((kind, plaintext))
+        Ok(kind)
     }
 
     pub fn send_error(&mut self, message: &str) -> Result<()> {
@@ -294,6 +312,11 @@ pub fn server_negotiate<S: Read + Write>(stream: &mut S, secure: bool) -> Result
     let mut preface = [0_u8; 8];
     stream.read_exact(&mut preface)?;
     validate_negotiation_header(preface)?;
+    if preface[6] & !FLAG_SECURE != 0 {
+        return Err(XferError::protocol(
+            "sender used unsupported negotiation flags",
+        ));
+    }
     let client_secure = preface[6] & FLAG_SECURE != 0;
     let status = if client_secure == secure {
         0
@@ -356,6 +379,11 @@ fn validate_negotiation_header(header: [u8; 8]) -> Result<()> {
             "protocol version mismatch: local {VERSION}, remote {version}"
         )));
     }
+    if header[7] != 0 {
+        return Err(XferError::protocol(
+            "negotiation reserved byte must be zero",
+        ));
+    }
     Ok(())
 }
 
@@ -400,5 +428,117 @@ mod tests {
                 .send_frame(FrameKind::Data, &vec![0_u8; MAX_RECORD_SIZE + 1])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn out_of_order_record_is_rejected() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender.send_frame(FrameKind::Data, b"hello").unwrap();
+        let mut bytes = sender.into_inner().into_inner();
+        bytes[8..16].copy_from_slice(&1_u64.to_be_bytes());
+
+        let mut receiver = RecordStream::new(Cursor::new(bytes), Role::Server, None, None);
+        assert!(receiver.receive_frame().is_err());
+    }
+
+    #[test]
+    fn unsupported_record_flags_are_rejected() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender.send_frame(FrameKind::Data, b"hello").unwrap();
+        let mut bytes = sender.into_inner().into_inner();
+        bytes[7] = 0x02;
+
+        let mut receiver = RecordStream::new(Cursor::new(bytes), Role::Server, None, None);
+        assert!(receiver.receive_frame().is_err());
+    }
+
+    #[test]
+    fn encrypted_flag_without_session_key_is_rejected() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender.send_frame(FrameKind::Data, b"hello").unwrap();
+        let mut bytes = sender.into_inner().into_inner();
+        bytes[6..8].copy_from_slice(&RECORD_FLAG_ENCRYPTED.to_be_bytes());
+
+        let mut receiver = RecordStream::new(Cursor::new(bytes), Role::Server, None, None);
+        assert!(receiver.receive_frame().is_err());
+    }
+
+    #[test]
+    fn remote_error_frame_is_returned_as_an_error() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender.send_error("receiver rejected the offer").unwrap();
+
+        let mut receiver = RecordStream::new(
+            Cursor::new(sender.into_inner().into_inner()),
+            Role::Server,
+            None,
+            None,
+        );
+        let error = receiver
+            .receive_message::<Offer>(FrameKind::Offer)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("receiver rejected the offer"));
+    }
+
+    #[test]
+    fn receive_frame_into_reuses_payload_capacity() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender
+            .send_frame(FrameKind::Data, &vec![1_u8; CHUNK_SIZE])
+            .unwrap();
+        sender
+            .send_frame(FrameKind::Data, &vec![2_u8; CHUNK_SIZE])
+            .unwrap();
+
+        let mut receiver = RecordStream::new(
+            Cursor::new(sender.into_inner().into_inner()),
+            Role::Server,
+            None,
+            None,
+        );
+        let mut payload = Vec::new();
+        receiver.receive_frame_into(&mut payload).unwrap();
+        let capacity = payload.capacity();
+        receiver.receive_frame_into(&mut payload).unwrap();
+        assert_eq!(payload.capacity(), capacity);
+        assert!(payload.iter().all(|byte| *byte == 2));
+    }
+
+    #[test]
+    fn negotiation_rejects_wrong_magic_version_and_reserved_byte() {
+        let mut wrong_magic = [0_u8; 8];
+        wrong_magic[..4].copy_from_slice(b"NOPE");
+        wrong_magic[4..6].copy_from_slice(&VERSION.to_be_bytes());
+        assert!(validate_negotiation_header(wrong_magic).is_err());
+
+        let mut wrong_version = [0_u8; 8];
+        wrong_version[..4].copy_from_slice(NEGOTIATION_MAGIC);
+        wrong_version[4..6].copy_from_slice(&(VERSION + 1).to_be_bytes());
+        assert!(validate_negotiation_header(wrong_version).is_err());
+
+        let mut reserved = [0_u8; 8];
+        reserved[..4].copy_from_slice(NEGOTIATION_MAGIC);
+        reserved[4..6].copy_from_slice(&VERSION.to_be_bytes());
+        reserved[7] = 1;
+        assert!(validate_negotiation_header(reserved).is_err());
+    }
+
+    #[test]
+    fn server_rejects_security_mode_mismatch_and_unknown_flags() {
+        let mut secure_preface = [0_u8; 8];
+        secure_preface[..4].copy_from_slice(NEGOTIATION_MAGIC);
+        secure_preface[4..6].copy_from_slice(&VERSION.to_be_bytes());
+        secure_preface[6] = FLAG_SECURE;
+        assert!(server_negotiate(&mut Cursor::new(secure_preface), false).is_err());
+
+        let mut unknown_flags = secure_preface;
+        unknown_flags[6] = 0x80;
+        assert!(server_negotiate(&mut Cursor::new(unknown_flags), false).is_err());
     }
 }

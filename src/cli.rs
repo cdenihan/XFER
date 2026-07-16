@@ -7,6 +7,7 @@ use clap_complete::{Shell, generate};
 use crate::{
     config::{Identity, Paths, TrustStore},
     crypto::{display_fingerprint, fingerprint},
+    discovery,
     filesystem::build_plan,
     net,
     protocol::DEFAULT_PORT,
@@ -96,6 +97,10 @@ enum Command {
         #[arg(long)]
         overwrite: bool,
 
+        /// Do not advertise this receiver to XFER senders on the local network.
+        #[arg(long)]
+        no_discovery: bool,
+
         /// Disable encryption and peer authentication.
         #[arg(long, alias = "no-secure")]
         insecure: bool,
@@ -110,6 +115,17 @@ enum Command {
 
     /// List useful local IPv4 and IPv6 addresses.
     Ip,
+
+    /// Passively list XFER receivers advertising on the local network.
+    Discover {
+        /// Seconds to listen for receiver announcements.
+        #[arg(
+            long,
+            default_value_t = 5,
+            value_parser = clap::value_parser!(u64).range(1..=60)
+        )]
+        timeout: u64,
+    },
 
     /// Inspect or remove remembered peers.
     Peers {
@@ -208,6 +224,7 @@ pub fn run() -> anyhow::Result<()> {
             bind,
             port,
             overwrite,
+            no_discovery,
             insecure,
             token,
         } => {
@@ -218,6 +235,7 @@ pub fn run() -> anyhow::Result<()> {
                     port,
                     output,
                     overwrite,
+                    discoverable: !no_discovery,
                     secure: !insecure,
                     token,
                     config_dir: cli.config_dir,
@@ -237,6 +255,19 @@ pub fn run() -> anyhow::Result<()> {
             } else {
                 for address in addresses {
                     println!("{address}");
+                }
+            }
+        }
+        Command::Discover { timeout } => {
+            let peers = discovery::discover_for(Duration::from_secs(timeout))?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&peers)?);
+            } else if peers.is_empty() {
+                println!("No XFER receivers found.");
+            } else {
+                for peer in peers {
+                    let security = if peer.secure { "secure" } else { "insecure" };
+                    println!("{}  {}  {security}", peer.name, peer.address);
                 }
             }
         }
@@ -329,6 +360,7 @@ fn doctor(paths: &Paths, json: bool) -> anyhow::Result<()> {
         "identity_fingerprint": identity_fingerprint,
         "addresses": addresses,
         "default_port": DEFAULT_PORT,
+        "discovery_multicast": discovery::group_address(),
         "status": "ok",
     });
     if json {
@@ -338,6 +370,10 @@ fn doctor(paths: &Paths, json: bool) -> anyhow::Result<()> {
         println!("Configuration: {}", paths.root().display());
         println!("Identity: {identity_fingerprint}");
         println!("Default port: {DEFAULT_PORT}");
+        println!(
+            "LAN discovery: {} (multicast TTL 1)",
+            discovery::group_address()
+        );
         if addresses.is_empty() {
             println!("Addresses: none detected (loopback transfers still work)");
         } else {

@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod crypto;
+pub mod discovery;
 pub mod error;
 pub mod filesystem;
 pub mod net;

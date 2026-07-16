@@ -5,7 +5,10 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -14,6 +17,7 @@ jobs:
   quality:
     name: Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
@@ -27,6 +31,7 @@ jobs:
   security:
     name: RustSec audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: rustsec/audit-check@v2.0.0
@@ -42,11 +47,41 @@ jobs:
           - macos-latest
           - windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo test --locked --all-targets
+
+  installers:
+    name: Installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Test Linux/macOS installer
+        if: runner.os != 'Windows'
+        shell: sh
+        run: tests/installers/install-sh.sh
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2.9.1
+        if: runner.os == 'Windows'
+      - name: Build Windows installer fixture
+        if: runner.os == 'Windows'
+        run: cargo build --locked
+      - name: Test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/installers/install-ps1.ps1
 
   cross-check:
     name: Check ${{ matrix.target }}
@@ -62,6 +97,7 @@ jobs:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable

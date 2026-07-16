@@ -284,4 +284,60 @@ mod tests {
         let loaded = TrustStore::load(&paths).unwrap();
         assert_eq!(loaded.get("127.0.0.1:9000").unwrap().fingerprint, "abcd");
     }
+
+    #[test]
+    fn invalid_identity_length_is_rejected() {
+        let directory = tempdir().unwrap();
+        let paths = Paths::discover(Some(directory.path().to_path_buf())).unwrap();
+        paths.ensure().unwrap();
+        fs::write(paths.identity(), [7_u8; 31]).unwrap();
+        assert!(Identity::load_or_create(&paths).is_err());
+    }
+
+    #[test]
+    fn invalid_peer_store_is_rejected() {
+        let directory = tempdir().unwrap();
+        let paths = Paths::discover(Some(directory.path().to_path_buf())).unwrap();
+        paths.ensure().unwrap();
+        fs::write(paths.peers(), b"{not json").unwrap();
+        assert!(TrustStore::load(&paths).is_err());
+    }
+
+    #[test]
+    fn remembering_peer_preserves_first_seen_and_updates_identity() {
+        let mut store = TrustStore::default();
+        store.remember("receiver:9000".into(), "first".into());
+        let first_seen = store.get("receiver:9000").unwrap().first_seen;
+        store.remember("receiver:9000".into(), "second".into());
+        let peer = store.get("receiver:9000").unwrap();
+        assert_eq!(peer.first_seen, first_seen);
+        assert_eq!(peer.fingerprint, "second");
+        assert!(peer.last_seen >= peer.first_seen);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_files_use_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let paths = Paths::discover(Some(directory.path().join("config"))).unwrap();
+        Identity::load_or_create(&paths).unwrap();
+        let mut store = TrustStore::default();
+        store.remember("receiver:9000".into(), "abcd".into());
+        store.save(&paths).unwrap();
+
+        assert_eq!(
+            fs::metadata(paths.root()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(paths.identity()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(paths.peers()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

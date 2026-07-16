@@ -10,6 +10,8 @@ All notable changes to XFER are documented here.
 - Replaced the multi-port protocol with one typed, ordered TCP record stream.
 - Replaced the placeholder terminal workflow with a Ratatui interface.
 - Redesigned the clap CLI and intentionally removed v3 wire compatibility.
+- Reused encrypted record buffers and throttled progress updates on the bulk
+  data path.
 
 ### Security
 
@@ -24,5 +26,11 @@ All notable changes to XFER are documented here.
 - IPv4/IPv6 support, exclusion globs, safe symlink following, dry-run planning,
   JSON events, peer management, diagnostics, shell completions, collision-safe
   receive names, and explicit overwrite behavior.
-- Unit, CLI, secure loopback, and directory-transfer tests.
-- Native and cross-platform CI plus tag-driven release automation.
+- TTL-1 same-LAN receiver discovery, multi-machine selection, and receiver IP
+  display in the TUI without subnet or port scanning.
+- Checksum-verifying, atomic installers for Linux GNU/musl, macOS, and Windows
+  across every supported x86_64 and ARM64 release target.
+- Extensive unit, CLI subprocess, installer, secure loopback, protocol
+  rejection, filesystem-safety, and directory-transfer tests.
+- Native and cross-platform CI without duplicate push/PR runs, plus tag-driven
+  release automation.

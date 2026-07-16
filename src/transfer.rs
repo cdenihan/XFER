@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use zeroize::Zeroize;
 use crate::{
     config::{Identity, Paths, TrustStore},
     crypto::{derive_session_keys, display_fingerprint, fingerprint, sas},
+    discovery::Advertiser,
     error::{Result, XferError},
     filesystem::{
         TransferPlan, build_plan, choose_destination, open_planned_file, path_to_wire,
@@ -48,6 +49,7 @@ pub struct ReceiveOptions {
     pub port: u16,
     pub output: PathBuf,
     pub overwrite: bool,
+    pub discoverable: bool,
     pub secure: bool,
     pub token: Option<String>,
     pub config_dir: Option<PathBuf>,
@@ -98,6 +100,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
     let mut files_done = 0_u64;
     let mut manifest = Sha256::new();
     let mut buffer = vec![0_u8; CHUNK_SIZE];
+    let mut last_progress = Instant::now();
 
     for entry in &plan.entries {
         let wire_path = path_to_wire(&entry.relative)?;
@@ -123,14 +126,17 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
             hash.update(&buffer[..count]);
             session.send_frame(FrameKind::Data, &buffer[..count])?;
             transferred += count as u64;
-            reporter.progress(&Progress {
-                phase: "Sending",
-                current_path: wire_path.clone(),
-                transferred,
-                total: plan.total_bytes,
-                files_done,
-                files_total: plan.file_count,
-            });
+            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                reporter.progress(&Progress {
+                    phase: "Sending",
+                    current_path: wire_path.clone(),
+                    transferred,
+                    total: plan.total_bytes,
+                    files_done,
+                    files_total: plan.file_count,
+                });
+                last_progress = Instant::now();
+            }
         }
         let digest: [u8; 32] = hash.finalize().into();
         update_manifest(&mut manifest, &wire_path, &digest);
@@ -170,7 +176,45 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
 }
 
 pub fn receive(options: &ReceiveOptions, reporter: &dyn Reporter) -> Result<TransferSummary> {
+    validate_receive_options(options)?;
     let listener = net::bind(&options.bind, options.port)?;
+    let local = listener.local_addr()?;
+    let port = local.port();
+    match net::listener_endpoints(local.ip(), port) {
+        Ok(endpoints) if !endpoints.is_empty() => {
+            reporter.status(&format!(
+                "receiver addresses: {}",
+                endpoints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            reporter.status(&format!(
+                "could not enumerate receiver addresses; use the bind address manually: {error}"
+            ));
+        }
+    }
+    let _advertiser = if options.discoverable {
+        match Advertiser::start(port, options.secure, local.ip()) {
+            Ok(advertiser) => {
+                reporter.status("LAN discovery is on (local multicast only)");
+                Some(advertiser)
+            }
+            Err(error) => {
+                reporter.status(&format!(
+                    "LAN discovery unavailable; manual IP entry still works: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        reporter.status("LAN discovery is off");
+        None
+    };
     receive_on_listener(&listener, options, reporter)
 }
 
@@ -179,11 +223,7 @@ pub fn receive_on_listener(
     options: &ReceiveOptions,
     reporter: &dyn Reporter,
 ) -> Result<TransferSummary> {
-    if options.token.is_some() && !options.secure {
-        return Err(XferError::invalid_input(
-            "--token can only be used with secure transfers",
-        ));
-    }
+    validate_receive_options(options)?;
     let local = listener.local_addr()?;
     reporter.status(&format!("listening on {local}"));
     let (stream, peer) = listener.accept()?;
@@ -238,6 +278,8 @@ fn receive_transfer(
     let mut files_done = 0_u64;
     let mut manifest = Sha256::new();
     let mut seen_paths = HashSet::new();
+    let mut payload = Vec::with_capacity(CHUNK_SIZE + 16);
+    let mut last_progress = Instant::now();
     for _ in 0..offer.entry_count {
         let entry: EntryStart = session.receive_message(FrameKind::EntryStart)?;
         let relative = safe_relative_path(&entry.path)?;
@@ -275,7 +317,7 @@ fn receive_transfer(
                 let mut received_for_file = 0_u64;
                 let mut hash = Sha256::new();
                 loop {
-                    let (kind, payload) = session.receive_frame()?;
+                    let kind = session.receive_frame_into(&mut payload)?;
                     match kind {
                         FrameKind::Data => {
                             received_for_file = received_for_file
@@ -290,14 +332,17 @@ fn receive_transfer(
                             file.write_all(&payload)?;
                             hash.update(&payload);
                             transferred += payload.len() as u64;
-                            reporter.progress(&Progress {
-                                phase: "Receiving",
-                                current_path: entry.path.clone(),
-                                transferred,
-                                total: offer.total_bytes,
-                                files_done,
-                                files_total: offer.file_count,
-                            });
+                            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                                reporter.progress(&Progress {
+                                    phase: "Receiving",
+                                    current_path: entry.path.clone(),
+                                    transferred,
+                                    total: offer.total_bytes,
+                                    files_done,
+                                    files_total: offer.file_count,
+                                });
+                                last_progress = Instant::now();
+                            }
                         }
                         FrameKind::EntryEnd => {
                             let end: EntryEnd = serde_json::from_slice(&payload)
@@ -319,6 +364,15 @@ fn receive_transfer(
                             file.sync_all()?;
                             update_manifest(&mut manifest, &entry.path, &digest);
                             files_done += 1;
+                            reporter.progress(&Progress {
+                                phase: "Receiving",
+                                current_path: entry.path.clone(),
+                                transferred,
+                                total: offer.total_bytes,
+                                files_done,
+                                files_total: offer.file_count,
+                            });
+                            last_progress = Instant::now();
                             break;
                         }
                         other => {
@@ -365,6 +419,17 @@ fn receive_transfer(
         total_bytes: transferred,
         peer,
     })
+}
+
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+fn validate_receive_options(options: &ReceiveOptions) -> Result<()> {
+    if options.token.is_some() && !options.secure {
+        return Err(XferError::invalid_input(
+            "--token can only be used with secure transfers",
+        ));
+    }
+    Ok(())
 }
 
 fn establish_client(
@@ -657,6 +722,7 @@ mod tests {
                     port,
                     output: receiver_output,
                     overwrite: false,
+                    discoverable: false,
                     secure: false,
                     token: None,
                     config_dir: None,
@@ -705,6 +771,7 @@ mod tests {
                     port,
                     output: receiver_output,
                     overwrite: false,
+                    discoverable: false,
                     secure: true,
                     token: Some("shared secret".into()),
                     config_dir: Some(receiver_config),
@@ -752,6 +819,7 @@ mod tests {
                     port,
                     output: receiver_output,
                     overwrite: false,
+                    discoverable: false,
                     secure: false,
                     token: None,
                     config_dir: None,
@@ -890,5 +958,197 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".xfer-backup-")
         }));
+    }
+
+    #[test]
+    fn zero_byte_file_transfer_round_trips() {
+        let source_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let source = source_dir.path().join("empty.bin");
+        fs::write(&source, []).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver_output = output_dir.path().to_path_buf();
+        let receiver = thread::spawn(move || {
+            receive_on_listener(
+                &listener,
+                &ReceiveOptions {
+                    bind: "127.0.0.1".into(),
+                    port,
+                    output: receiver_output,
+                    overwrite: false,
+                    discoverable: false,
+                    secure: false,
+                    token: None,
+                    config_dir: None,
+                },
+                &SilentReporter,
+            )
+            .unwrap()
+        });
+
+        let summary = send(
+            &SendOptions {
+                host: "127.0.0.1".into(),
+                port,
+                input: source,
+                excludes: Vec::new(),
+                follow_links: false,
+                secure: false,
+                token: None,
+                connect_timeout: Duration::from_secs(2),
+                config_dir: None,
+            },
+            &SilentReporter,
+        )
+        .unwrap();
+        assert_eq!(summary.total_bytes, 0);
+        assert_eq!(
+            fs::metadata(receiver.join().unwrap().destination)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn receive_collision_uses_numbered_destination() {
+        let source_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let source = source_dir.path().join("payload.txt");
+        fs::write(&source, b"new").unwrap();
+        fs::write(output_dir.path().join("payload.txt"), b"old").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver_output = output_dir.path().to_path_buf();
+        let receiver = thread::spawn(move || {
+            receive_on_listener(
+                &listener,
+                &ReceiveOptions {
+                    bind: "127.0.0.1".into(),
+                    port,
+                    output: receiver_output,
+                    overwrite: false,
+                    discoverable: false,
+                    secure: false,
+                    token: None,
+                    config_dir: None,
+                },
+                &SilentReporter,
+            )
+            .unwrap()
+        });
+
+        send(
+            &SendOptions {
+                host: "127.0.0.1".into(),
+                port,
+                input: source,
+                excludes: Vec::new(),
+                follow_links: false,
+                secure: false,
+                token: None,
+                connect_timeout: Duration::from_secs(2),
+                config_dir: None,
+            },
+            &SilentReporter,
+        )
+        .unwrap();
+        let summary = receiver.join().unwrap();
+        assert_eq!(
+            fs::read(output_dir.path().join("payload.txt")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            summary.destination,
+            output_dir.path().join("payload (1).txt")
+        );
+        assert_eq!(fs::read(summary.destination).unwrap(), b"new");
+    }
+
+    #[test]
+    fn changed_pinned_identity_is_rejected_without_store_update() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_dir = tempdir().unwrap();
+        let client_dir = tempdir().unwrap();
+        let server_paths = Paths::discover(Some(server_dir.path().to_path_buf())).unwrap();
+        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
+        let mut trust = TrustStore::default();
+        trust.remember(address.to_string(), "00".repeat(32));
+        trust.save(&client_paths).unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            establish_server(stream, true, None, &server_paths, &SilentReporter)
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        assert!(establish_client(stream, true, None, &client_paths, &SilentReporter).is_err());
+        assert!(server.join().unwrap().is_ok());
+        assert_eq!(
+            TrustStore::load(&client_paths)
+                .unwrap()
+                .get(&address.to_string())
+                .unwrap()
+                .fingerprint,
+            "00".repeat(32)
+        );
+    }
+
+    #[test]
+    fn offer_and_receive_option_safety_limits_are_enforced() {
+        assert!(
+            validate_offer(&Offer {
+                root_name: "file.txt".into(),
+                kind: TransferKind::File,
+                total_bytes: 0,
+                file_count: 0,
+                entry_count: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_offer(&Offer {
+                root_name: "directory".into(),
+                kind: TransferKind::Directory,
+                total_bytes: 0,
+                file_count: 2,
+                entry_count: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_offer(&Offer {
+                root_name: "directory".into(),
+                kind: TransferKind::Directory,
+                total_bytes: 0,
+                file_count: 0,
+                entry_count: 10_000_001,
+            })
+            .is_err()
+        );
+
+        assert!(
+            validate_receive_options(&ReceiveOptions {
+                bind: "::".into(),
+                port: 9_000,
+                output: PathBuf::from("."),
+                overwrite: false,
+                discoverable: false,
+                secure: false,
+                token: Some("secret".into()),
+                config_dir: None,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn human_byte_formatting_handles_boundaries() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1_023), "1023 B");
+        assert_eq!(human_bytes(1_024), "1.0 KiB");
+        assert_eq!(human_bytes(1_536), "1.5 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
     }
 }

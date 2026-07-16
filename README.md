@@ -17,12 +17,33 @@ The v4 rewrite is a library-first Rust application with a
 - Per-file SHA-256 and aggregate manifest verification
 - Atomic receive staging: unverified data never appears at the final path
 - IPv4 and IPv6 support over one configurable port
+- Passive same-LAN receiver discovery with no subnet or port scanning
 - Collision-safe destination naming and explicit `--overwrite`
 - Exclusion globs, safe symlink handling, and a no-network `--dry-run`
 - Optional shared token mixed into key derivation
 - Human progress, newline-delimited JSON events, and a live TUI
 - Peer-management, diagnostics, and shell-completion commands
 - Native CI on Linux, macOS, and Windows plus cross-target checks
+
+## Install
+
+Linux or macOS:
+
+```console
+curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 | iex
+```
+
+The installers detect the operating system, CPU architecture, and Linux libc;
+download the matching release binary; verify its SHA-256 file; and replace an
+existing installation atomically. See [docs/INSTALLATION.md](docs/INSTALLATION.md)
+for version pinning, install locations, PATH behavior, mirrors, and manual
+installation.
 
 ## Quick start
 
@@ -34,7 +55,13 @@ On the receiving machine:
 xfer receive --output ~/Downloads
 ```
 
-On the sending machine:
+On the sending machine, open the TUI and choose the discovered receiver:
+
+```console
+xfer tui
+```
+
+Or send directly to an address:
 
 ```console
 xfer send 192.168.1.42 ./photos
@@ -45,7 +72,10 @@ Compare the codes before approving the receiver on the sending machine. The
 receiver identity is remembered for future transfers. An identity change always
 requires manual confirmation.
 
-Use `xfer ip` on the receiver if you need its local address.
+Receivers advertise only while `xfer receive` is waiting. Discovery uses one
+small, link-local multicast announcement rather than probing machines or ports.
+If multicast is unavailable, use the receiver address shown in the TUI or by
+`xfer ip`.
 
 ## Terminal interface
 
@@ -56,7 +86,10 @@ xfer tui
 ```
 
 The TUI provides send and receive forms, security and overwrite controls, live
-progress, activity logs, and an in-app peer confirmation dialog.
+progress, activity logs, and an in-app peer confirmation dialog. Send mode
+automatically lists every active XFER receiver detected on the same LAN; use the
+arrow keys and Enter to select one. Receive mode shows the local IP addresses
+and ports another machine can use.
 
 ## CLI
 
@@ -100,6 +133,8 @@ xfer receive --output ./downloads
 The receiver accepts one transfer, verifies it, writes it to the destination,
 and exits. If the destination name already exists, XFER chooses a numbered name
 such as `photo (1).jpg`. Use `--overwrite` to replace the exact destination.
+The receiver is discoverable on the local network by default. Use
+`--no-discovery` when you want to require manual address entry.
 
 To bind a specific interface:
 
@@ -126,6 +161,7 @@ Secure automation must either use an already remembered peer or opt into
 
 ```console
 xfer ip
+xfer discover
 xfer doctor
 xfer peers list
 xfer peers forget 192.168.1.42:9000
@@ -137,6 +173,9 @@ Global configuration options:
 
 - `--config-dir <PATH>` or `XFER_CONFIG_DIR`: override `~/.xfer`
 - `--json`: emit machine-readable events
+
+Set `XFER_NAME` on a receiver to override the machine label shown during LAN
+discovery.
 
 ### Insecure mode
 
@@ -179,9 +218,9 @@ records Rust 1.88 as the minimum version accepted by the latest dependency set.
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-cargo build --release
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
+cargo build --release --locked
 cargo audit
 ```
 
@@ -198,7 +237,7 @@ For contributor architecture, test strategy, and release details, see
 - File metadata such as ownership, ACLs, and extended attributes is not copied.
 - Entry names must be valid UTF-8 and portable across Windows, macOS, and Linux;
   case-only collisions and Windows-reserved names are rejected.
-- Discovery is intentionally explicit; XFER does not broadcast presence on the
-  network.
+- Automatic discovery currently uses IPv4 multicast; direct transfers continue
+  to support both IPv4 and IPv6.
 
 These constraints keep the protocol small, deterministic, and auditable.

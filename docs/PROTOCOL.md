@@ -12,6 +12,21 @@ Consolidating the transfer into one ordered stream avoids races between control,
 data, metadata, status, and heartbeat sockets. Typed frames retain those logical
 boundaries without requiring adjacent ports.
 
+## LAN discovery
+
+Discovery is separate from the transfer stream. A waiting receiver sends a
+compact JSON announcement every two seconds to `239.255.90.90:39090` with IPv4
+multicast TTL 1. The packet identifies the `xfer` service, discovery and
+transfer protocol versions, machine label, TCP transfer port, and whether secure
+mode is enabled.
+
+Senders passively listen for these announcements and expire a receiver after
+seven seconds without a refresh. They do not sweep an address range, probe
+ports, or automatically connect. Discovery is advisory and unauthenticated;
+the secure handshake and receiver identity pinning described below are still
+required. Direct TCP transfers remain dual-stack even though discovery is
+currently IPv4 multicast.
+
 ## Negotiation
 
 The sender writes an 8-byte preface:
@@ -28,6 +43,7 @@ on success, `1` when secure mode is required, or `2` when the receiver is
 configured for insecure mode.
 
 Both endpoints must select the same security mode. There is no silent downgrade.
+Unknown sender flags and a non-zero reserved byte are rejected.
 
 ## Secure handshake
 
@@ -67,7 +83,8 @@ header is associated data. The nonce is the directional 4-byte prefix followed
 by the 8-byte record sequence number.
 
 Receivers require the exact next sequence number and reject records larger than
-the configured bound.
+the configured bound. Record flags are reserved for future protocol versions;
+v4 rejects any non-zero value.
 
 Frame kinds:
 

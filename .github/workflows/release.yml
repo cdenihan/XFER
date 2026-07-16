@@ -9,8 +9,27 @@ permissions:
   contents: write
 
 jobs:
+  validate-release:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Match tag to crate version
+        shell: bash
+        run: |
+          crate_version="$(
+            cargo metadata --locked --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "xfer") | .version'
+          )"
+          if [[ "$GITHUB_REF_NAME" != "v${crate_version}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match crate version v${crate_version}" >&2
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
@@ -90,10 +109,23 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7.0.0
+
       - uses: actions/download-artifact@v8.0.1
         with:
           path: dist
           merge-multiple: true
+
+      - name: Add install scripts
+        shell: bash
+        run: |
+          cp scripts/install.sh scripts/install.ps1 dist/
+          chmod 0755 dist/install.sh
+          (
+            cd dist
+            openssl dgst -sha256 -r install.sh > install.sh.sha256
+            openssl dgst -sha256 -r install.ps1 > install.ps1.sha256
+          )
 
       - uses: softprops/action-gh-release@v3.0.2
         with:

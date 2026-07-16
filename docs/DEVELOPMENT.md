@@ -9,6 +9,7 @@ XFER is one package with a library and a thin binary:
 | `cli` | clap command model and command dispatch |
 | `config` | identity, permissions, and TOFU peer persistence |
 | `crypto` | key derivation, fingerprints, SAS, and AEAD helpers |
+| `discovery` | TTL-1 multicast receiver announcements and passive browsing |
 | `filesystem` | source planning, exclusions, safe paths, destination naming |
 | `net` | dual-stack listeners, address discovery, and connection setup |
 | `protocol` | negotiation, typed messages, and framed record transport |
@@ -29,10 +30,11 @@ Run the full local gate:
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
 cargo build --release --locked
 cargo audit
+tests/installers/install-sh.sh
 ```
 
 Install the audit command with `cargo install cargo-audit --locked`.
@@ -45,20 +47,29 @@ need to grant that capability.
 Unit tests cover:
 
 - stable identity and peer-store persistence;
-- key agreement, record encryption, and tamper detection;
-- protocol record bounds and ordering;
-- exclusion planning, path traversal rejection, and collision naming;
-- clap command validity.
+- key agreement, record encryption, token separation, and tamper detection;
+- protocol record bounds, flags, sequence ordering, and negotiation rejection;
+- discovery validation, version filtering, address selection, and name limits;
+- exclusions, path traversal, portability, symlink escape, and collision naming;
+- TUI form defaults, endpoint formatting, and constrained layouts;
+- clap command validity and value bounds.
 
 End-to-end tests bind an ephemeral loopback port and cover:
 
 - plaintext compatibility transfer;
 - secure transfer with a shared token;
+- zero-byte files and collision-safe destinations;
 - directory trees and empty directories;
-- wrong-token failure before TOFU persistence.
+- wrong-token failure before TOFU persistence;
+- changed pinned-identity rejection;
+- a complete transfer between two compiled CLI processes.
 
-CLI integration tests verify help and dry-run behavior through the compiled
-binary.
+CLI integration tests verify human and JSON output, diagnostics, peer
+management, completion generation, validation failures, and a real subprocess
+transfer. Installer tests build local release fixtures, exercise platform
+selection and checksum verification, and prove that failed upgrades preserve an
+existing installation. CI runs the POSIX installer tests on Linux and macOS and
+the PowerShell tests on Windows.
 
 When changing the wire format, add a focused protocol test and update
 `docs/PROTOCOL.md`.
@@ -89,7 +100,9 @@ A breaking wire change increments `protocol::VERSION` and the record version.
 ## CI and releases
 
 Pull requests run format, Clippy, tests on all three desktop operating systems,
-and cross-target `cargo check` using current stable Rust.
+and cross-target `cargo check` using current stable Rust. Branch pushes do not
+duplicate those runs; pushes to `main` validate the merged result. Superseded
+runs for the same pull request or ref are cancelled.
 
 Tags matching `v*` build raw release binaries and SHA-256 files for:
 
@@ -97,4 +110,5 @@ Tags matching `v*` build raw release binaries and SHA-256 files for:
 - macOS x86_64 and Apple Silicon;
 - Windows x86_64 and ARM64.
 
-Release builds use `--locked`.
+Release builds use `--locked`. The release also publishes `install.sh`,
+`install.ps1`, and checksums for both scripts.

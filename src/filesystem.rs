@@ -518,4 +518,56 @@ mod tests {
 
         assert!(open_planned_file(&plan.entries[0], false).is_err());
     }
+
+    #[test]
+    fn empty_directory_plan_has_no_files_or_bytes() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("empty");
+        fs::create_dir(&root).unwrap();
+        let plan = build_plan(&root, &[], false).unwrap();
+        assert_eq!(plan.kind, TransferKind::Directory);
+        assert_eq!(plan.file_count, 0);
+        assert_eq!(plan.total_bytes, 0);
+        assert!(plan.entries.is_empty());
+    }
+
+    #[test]
+    fn invalid_exclude_glob_is_rejected() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("payload");
+        fs::create_dir(&root).unwrap();
+        assert!(build_plan(&root, &["[".into()], false).is_err());
+    }
+
+    #[test]
+    fn wire_names_reject_separators_and_special_components() {
+        assert!(validate_wire_name("").is_err());
+        assert!(validate_wire_name(".").is_err());
+        assert!(validate_wire_name("..").is_err());
+        assert!(validate_wire_name("nested/file").is_err());
+        assert!(validate_wire_name("trailing.").is_err());
+        assert_eq!(validate_wire_name("archive.tar").unwrap(), "archive.tar");
+    }
+
+    #[test]
+    fn destination_numbering_preserves_multi_dot_extension() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("archive.tar.gz"), b"existing").unwrap();
+        let destination = choose_destination(directory.path(), "archive.tar.gz", false).unwrap();
+        assert_eq!(destination, directory.path().join("archive.tar (1).gz"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn followed_symlink_must_remain_inside_transfer_root() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("root");
+        let outside = directory.path().join("outside.txt");
+        fs::create_dir(&root).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        assert!(build_plan(&root, &[], true).is_err());
+    }
 }

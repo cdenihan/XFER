@@ -46,6 +46,28 @@ The identity file and peer store use private Unix permissions when applicable.
 XFER cannot protect secrets after the local account or either endpoint is
 compromised.
 
+## LAN discovery
+
+While a discoverable receiver is waiting, it sends a small XFER presence
+announcement every two seconds to the administratively scoped IPv4 multicast
+address `239.255.90.90:39090` with TTL 1. Senders listen to that group and do
+not enumerate subnets, probe hosts, scan ports, or attempt connections until the
+user starts a transfer. `xfer receive --no-discovery` disables announcements.
+
+Discovery packets are intentionally unauthenticated and contain only the
+machine label, transfer port, protocol version, and security-mode flag. Treat
+the discovered name and address as advisory: the secure transfer handshake, SAS
+comparison, and pinned receiver identity remain authoritative. A malicious LAN
+peer can spoof or suppress discovery but cannot bypass those checks.
+
+## Release installers
+
+Official installers select only a named supported release artifact, download
+the adjacent SHA-256 file, verify it before execution, and stage replacement in
+the destination directory. Checksum, download, compatibility, or write failures
+leave an existing installation unchanged. Network release URLs must use HTTPS;
+`file://` is accepted only to support offline mirrors and installer tests.
+
 ## Filesystem safety
 
 Incoming names are constrained to relative normal path components. Absolute
