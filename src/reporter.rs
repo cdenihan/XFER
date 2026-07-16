@@ -44,8 +44,10 @@ impl Reporter for SilentReporter {
 
     fn show_sas(&self, _sas: &str, _fingerprint: &str) {}
 
-    fn confirm_peer(&self, prompt: &TrustPrompt) -> Result<bool> {
-        Ok(!prompt.changed)
+    fn confirm_peer(&self, _prompt: &TrustPrompt) -> Result<bool> {
+        Err(XferError::security(
+            "the silent reporter cannot trust an unseen peer; provide an explicit trust policy",
+        ))
     }
 }
 
@@ -156,5 +158,21 @@ impl Reporter for CliReporter {
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silent_reporter_rejects_unseen_peers() {
+        let prompt = TrustPrompt {
+            endpoint: "127.0.0.1:9000".into(),
+            fingerprint: "fingerprint".into(),
+            sas: "123-456".into(),
+            changed: false,
+        };
+        assert!(SilentReporter.confirm_peer(&prompt).is_err());
     }
 }

@@ -80,7 +80,7 @@ fn run_app(terminal: &mut TuiTerminal, config_dir: Option<PathBuf>) -> Result<()
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && app.handle_key(key)?
+            && app.handle_key(key)
         {
             return Ok(());
         }
@@ -257,7 +257,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
         if let Some((prompt, reply)) = self.pending_trust.take() {
             match key.code {
                 KeyCode::Char('y' | 'Y') => {
@@ -272,12 +272,12 @@ impl App {
                     self.pending_trust = Some((prompt, reply));
                 }
             }
-            return Ok(false);
+            return false;
         }
 
         match self.screen {
             Screen::Home => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+                KeyCode::Char('q') | KeyCode::Esc => return true,
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.home_selection = self.home_selection.saturating_sub(1);
                 }
@@ -331,7 +331,11 @@ impl App {
                 KeyCode::Backspace => {
                     self.form.values[self.form.focus].pop();
                 }
-                KeyCode::F(2) => self.start_transfer()?,
+                KeyCode::F(2) => {
+                    if let Err(error) = self.start_transfer() {
+                        self.push_log(format!("Input error: {error}"));
+                    }
+                }
                 KeyCode::F(3) => self.form.secure = !self.form.secure,
                 KeyCode::F(4) => self.form.option = !self.form.option,
                 KeyCode::F(5) => match self.form.mode {
@@ -347,11 +351,11 @@ impl App {
                 if self.finished
                     && matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q'))
                 {
-                    return Ok(true);
+                    return true;
                 }
             }
         }
-        Ok(false)
+        false
     }
 
     fn start_transfer(&mut self) -> Result<()> {
@@ -870,6 +874,10 @@ fn more_count(total: usize, shown: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use crossterm::event::KeyModifiers;
+
     use super::*;
 
     #[test]
@@ -923,5 +931,23 @@ mod tests {
         assert_eq!(on_off(false), "off");
         assert_eq!(more_count(2, 2), "");
         assert_eq!(more_count(4, 2), "  (+2 more; xfer ip)");
+    }
+
+    #[test]
+    fn invalid_port_keeps_the_form_open() {
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let mut app = App::new(None, worker_tx, worker_rx);
+        app.screen = Screen::Form;
+        app.form.values[2] = "not-a-port".into();
+
+        let should_quit = app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+
+        assert!(!should_quit);
+        assert_eq!(app.screen, Screen::Form);
+        assert!(
+            app.logs
+                .back()
+                .is_some_and(|message| message.contains("port must be between"))
+        );
     }
 }

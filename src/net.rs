@@ -12,6 +12,17 @@ const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const TRANSFER_SOCKET_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
+    connect_with_deadline(host, port, timeout).map(|(stream, _)| stream)
+}
+
+pub(crate) fn connect_with_deadline(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(TcpStream, Instant)> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| XferError::invalid_input("connect timeout is too large"))?;
     let addresses = (host, port)
         .to_socket_addrs()
         .map_err(|error| {
@@ -24,17 +35,16 @@ pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
         )));
     }
 
-    let started = Instant::now();
     let mut last_error = None;
     for address in addresses {
-        let remaining = timeout.saturating_sub(started.elapsed());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(5))) {
             Ok(stream) => {
                 configure_stream(&stream)?;
-                return Ok(stream);
+                return Ok((stream, deadline));
             }
             Err(error) => last_error = Some((address, error)),
         }
@@ -65,6 +75,7 @@ pub fn bind(host: &str, port: u16) -> Result<TcpListener> {
         Domain::IPV4
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(not(windows))]
     socket.set_reuse_address(true)?;
     if address.is_ipv6() {
         socket.set_only_v6(false)?;
@@ -91,6 +102,25 @@ pub fn suspend_read_timeout(stream: &TcpStream) -> Result<()> {
 
 pub fn restore_read_timeout(stream: &TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    Ok(())
+}
+
+pub fn restore_io_timeouts(stream: &TcpStream) -> Result<()> {
+    restore_read_timeout(stream)?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(())
+}
+
+pub(crate) fn apply_deadline(stream: &TcpStream, deadline: Instant) -> Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(XferError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "connection negotiation timed out",
+        )));
+    }
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
     Ok(())
 }
 

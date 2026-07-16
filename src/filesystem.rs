@@ -128,14 +128,6 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                 entry.path().display()
             ))
         })?;
-        let portable_key = portable_path_key(relative)?;
-        if !portable_paths.insert(portable_key) {
-            return Err(XferError::invalid_input(format!(
-                "{} collides with another path when compared case-insensitively",
-                relative.display()
-            )));
-        }
-
         let file_type = entry.file_type();
         if file_type.is_symlink() && !follow_links {
             skipped_count += 1;
@@ -149,6 +141,18 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                     entry.path().display()
                 )));
             }
+        }
+        if !file_type.is_dir() && !file_type.is_file() {
+            skipped_count += 1;
+            continue;
+        }
+
+        let portable_key = portable_path_key(relative)?;
+        if !portable_paths.insert(portable_key) {
+            return Err(XferError::invalid_input(format!(
+                "{} collides with another path when compared case-insensitively",
+                relative.display()
+            )));
         }
 
         if file_type.is_dir() {
@@ -180,8 +184,6 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                 identity: Some(file_identity(&metadata)),
                 canonical_source: Some(fs::canonicalize(entry.path())?),
             });
-        } else {
-            skipped_count += 1;
         }
     }
     skipped_count += excluded_count.get();
@@ -416,10 +418,16 @@ fn validate_portable_component(component: &str) -> Result<()> {
         .to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || stem.strip_prefix("COM").is_some_and(|suffix| {
-            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
         })
         || stem.strip_prefix("LPT").is_some_and(|suffix| {
-            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
         });
     if reserved {
         return Err(XferError::invalid_input(format!(
@@ -490,6 +498,8 @@ mod tests {
     #[test]
     fn rejects_non_portable_and_case_colliding_names() {
         assert!(safe_relative_path("CON.txt").is_err());
+        assert!(safe_relative_path("COM¹.txt").is_err());
+        assert!(safe_relative_path("lpt²").is_err());
         assert!(safe_relative_path("bad:name").is_err());
 
         assert_eq!(
@@ -517,6 +527,22 @@ mod tests {
         symlink(&outside, &source).unwrap();
 
         assert!(open_planned_file(&plan.entries[0], false).is_err());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn skipped_symlinks_do_not_create_portable_name_collisions() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("README"), b"included").unwrap();
+        symlink("README", root.join("readme")).unwrap();
+
+        let plan = build_plan(&root, &[], false).unwrap();
+        assert_eq!(plan.file_count, 1);
+        assert_eq!(plan.skipped_count, 1);
     }
 
     #[test]

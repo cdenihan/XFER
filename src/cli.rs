@@ -281,9 +281,9 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Result<()> {
-    let mut store = TrustStore::load(paths)?;
     match command {
         PeerCommand::List => {
+            let store = TrustStore::load(paths)?;
             let peers = store
                 .iter()
                 .map(|(endpoint, peer)| {
@@ -310,10 +310,10 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
             }
         }
         PeerCommand::Forget { endpoint } => {
-            if !store.remove(&endpoint) {
+            let removed = TrustStore::update(paths, |store| Ok(store.remove(&endpoint)))?;
+            if !removed {
                 anyhow::bail!("no remembered peer named {endpoint}");
             }
-            store.save(paths)?;
             if json {
                 println!(
                     "{}",
@@ -331,8 +331,10 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
             if !yes {
                 anyhow::bail!("refusing to clear every peer without --yes");
             }
-            store.clear();
-            store.save(paths)?;
+            TrustStore::update(paths, |store| {
+                store.clear();
+                Ok(())
+            })?;
             if json {
                 println!(
                     "{}",

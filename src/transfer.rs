@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -24,8 +24,8 @@ use crate::{
     protocol::{
         CHUNK_SIZE, ClientHello, Complete, Decision, EntryEnd, EntryKind, EntryStart, FrameKind,
         Offer, RecordStream, Role, ServerHello, TransferEnd, TransferKind, client_negotiate,
-        read_client_hello, read_server_hello, server_negotiate, write_client_hello,
-        write_server_hello,
+        read_client_hello, read_server_hello, sanitize_peer_text, server_negotiate,
+        write_client_hello, write_server_hello,
     },
     reporter::{Progress, Reporter, TrustPrompt},
 };
@@ -64,14 +64,11 @@ pub struct TransferSummary {
 }
 
 pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSummary> {
-    if options.token.is_some() && !options.secure {
-        return Err(XferError::invalid_input(
-            "--token can only be used with secure transfers",
-        ));
-    }
+    validate_secure_token(options.secure, options.token.as_deref())?;
     let plan = build_plan(&options.input, &options.excludes, options.follow_links)?;
     reporter.status(&format_plan(&plan));
-    let stream = net::connect(&options.host, options.port, options.connect_timeout)?;
+    let (stream, deadline) =
+        net::connect_with_deadline(&options.host, options.port, options.connect_timeout)?;
     let peer = stream.peer_addr()?;
     reporter.status(&format!("connected to {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
@@ -81,6 +78,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         options.token.as_deref(),
         &paths,
         reporter,
+        deadline,
     )?;
 
     let offer = Offer {
@@ -93,7 +91,9 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
     session.send_message(FrameKind::Offer, &offer)?;
     match session.receive_message::<Decision>(FrameKind::Decision)? {
         Decision::Accept => {}
-        Decision::Reject(reason) => return Err(XferError::Rejected(reason)),
+        Decision::Reject(reason) => {
+            return Err(XferError::Rejected(sanitize_peer_text(&reason)));
+        }
     }
 
     let mut transferred = 0_u64;
@@ -162,6 +162,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         },
     )?;
     let complete: Complete = session.receive_message(FrameKind::Complete)?;
+    validate_completion(&complete, files_done, transferred)?;
     reporter.status(&format!(
         "receiver verified {} across {} file(s)",
         human_bytes(complete.total_bytes),
@@ -400,7 +401,9 @@ fn receive_transfer(
         ));
     }
 
-    install_staged(&stage_path, &destination, options.overwrite)?;
+    if let Some(warning) = install_staged(&stage_path, &destination, options.overwrite)? {
+        reporter.status(&warning);
+    }
     session.send_message(
         FrameKind::Complete,
         &Complete {
@@ -424,9 +427,25 @@ fn receive_transfer(
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 fn validate_receive_options(options: &ReceiveOptions) -> Result<()> {
-    if options.token.is_some() && !options.secure {
+    validate_secure_token(options.secure, options.token.as_deref())
+}
+
+fn validate_secure_token(secure: bool, token: Option<&str>) -> Result<()> {
+    if token.is_some_and(str::is_empty) {
+        return Err(XferError::invalid_input("--token must not be empty"));
+    }
+    if token.is_some() && !secure {
         return Err(XferError::invalid_input(
             "--token can only be used with secure transfers",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_completion(complete: &Complete, files_done: u64, transferred: u64) -> Result<()> {
+    if complete.file_count != files_done || complete.total_bytes != transferred {
+        return Err(XferError::security(
+            "receiver completion totals did not match the sent transfer",
         ));
     }
     Ok(())
@@ -438,9 +457,12 @@ fn establish_client(
     token: Option<&str>,
     paths: &Paths,
     reporter: &dyn Reporter,
+    deadline: Instant,
 ) -> Result<RecordStream<TcpStream>> {
+    net::apply_deadline(&stream, deadline)?;
     client_negotiate(&mut stream, secure)?;
     if !secure {
+        net::restore_io_timeouts(&stream)?;
         return Ok(RecordStream::new(stream, Role::Client, None, None));
     }
 
@@ -484,7 +506,8 @@ fn establish_client(
     );
     session.send_message(FrameKind::Ready, &())?;
     session.receive_message::<()>(FrameKind::Ready)?;
-    let mut trust = TrustStore::load(paths)?;
+    net::restore_io_timeouts(session.get_mut())?;
+    let trust = TrustStore::load(paths)?;
     let changed = trust
         .get(&endpoint)
         .is_some_and(|peer| peer.fingerprint != fingerprint);
@@ -504,8 +527,18 @@ fn establish_client(
             return Err(XferError::security("peer was not trusted"));
         }
     }
-    trust.remember(endpoint, fingerprint);
-    trust.save(paths)?;
+    TrustStore::update(paths, |trust| {
+        if trust
+            .get(&endpoint)
+            .is_some_and(|peer| peer.fingerprint != fingerprint)
+        {
+            return Err(XferError::security(
+                "receiver identity changed while trust was being confirmed",
+            ));
+        }
+        trust.remember(endpoint, fingerprint);
+        Ok(())
+    })?;
 
     Ok(session)
 }
@@ -620,10 +653,14 @@ fn remove_existing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_staged(stage: &Path, destination: &Path, overwrite: bool) -> Result<()> {
-    if !overwrite || !destination.exists() {
+fn install_staged(stage: &Path, destination: &Path, overwrite: bool) -> Result<Option<String>> {
+    if !overwrite {
+        install_noclobber(stage, destination)?;
+        return Ok(None);
+    }
+    if !destination.exists() {
         fs::rename(stage, destination)?;
-        return Ok(());
+        return Ok(None);
     }
 
     let parent = destination
@@ -656,9 +693,77 @@ fn install_staged(stage: &Path, destination: &Path, overwrite: bool) -> Result<(
         };
     }
 
-    remove_existing(&backup)?;
-    fs::remove_dir(&backup_directory)?;
-    Ok(())
+    let cleanup_warning = cleanup_overwrite_backup(&backup, &backup_directory);
+    Ok(cleanup_warning)
+}
+
+fn install_noclobber(stage: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(stage)?;
+    if metadata.is_file() {
+        return install_file_noclobber(stage, destination, &metadata);
+    }
+    if !metadata.is_dir() {
+        return Err(XferError::invalid_input(format!(
+            "staged path {} is not a file or directory",
+            stage.display()
+        )));
+    }
+
+    fs::create_dir(destination)?;
+    let result = (|| {
+        for entry in fs::read_dir(stage)? {
+            let entry = entry?;
+            install_noclobber(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        fs::set_permissions(destination, metadata.permissions())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = remove_existing(destination);
+    }
+    result
+}
+
+fn install_file_noclobber(stage: &Path, destination: &Path, metadata: &fs::Metadata) -> Result<()> {
+    match fs::hard_link(stage, destination) {
+        Ok(()) => return Ok(()),
+        Err(error) if path_exists(destination) => return Err(error.into()),
+        Err(_) => {}
+    }
+
+    let mut source = File::open(stage)?;
+    let mut target = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let result = (|| {
+        io::copy(&mut source, &mut target)?;
+        target.flush()?;
+        target.sync_all()?;
+        fs::set_permissions(destination, metadata.permissions())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn cleanup_overwrite_backup(backup: &Path, backup_directory: &Path) -> Option<String> {
+    let cleanup = remove_existing(backup).and_then(|()| {
+        fs::remove_dir(backup_directory)?;
+        Ok(())
+    });
+    cleanup.err().map(|error| {
+        format!(
+            "installed the replacement, but could not remove the previous destination at {}: {error}",
+            backup.display()
+        )
+    })
 }
 
 fn format_plan(plan: &TransferPlan) -> String {
@@ -701,9 +806,23 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::reporter::SilentReporter;
+    use crate::reporter::{Progress, SilentReporter, TrustPrompt};
 
     use super::*;
+
+    struct AcceptNewReporter;
+
+    impl Reporter for AcceptNewReporter {
+        fn status(&self, _message: &str) {}
+
+        fn progress(&self, _progress: &Progress) {}
+
+        fn show_sas(&self, _sas: &str, _fingerprint: &str) {}
+
+        fn confirm_peer(&self, prompt: &TrustPrompt) -> Result<bool> {
+            Ok(!prompt.changed)
+        }
+    }
 
     #[test]
     fn insecure_file_transfer_round_trips() {
@@ -793,7 +912,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(2),
                 config_dir: Some(sender_config.path().to_path_buf()),
             },
-            &SilentReporter,
+            &AcceptNewReporter,
         )
         .unwrap();
         let summary = receiver.join().unwrap();
@@ -869,7 +988,14 @@ mod tests {
             establish_server(stream, true, Some("server"), &server_paths, &SilentReporter)
         });
         let stream = TcpStream::connect(address).unwrap();
-        let result = establish_client(stream, true, Some("client"), &client_paths, &SilentReporter);
+        let result = establish_client(
+            stream,
+            true,
+            Some("client"),
+            &client_paths,
+            &SilentReporter,
+            Instant::now() + Duration::from_secs(2),
+        );
         assert!(result.is_err());
         assert!(server.join().unwrap().is_err());
         assert!(!client_paths.peers().exists());
@@ -908,7 +1034,15 @@ mod tests {
             session.get_mut().read_timeout().unwrap()
         });
         let stream = TcpStream::connect(address).unwrap();
-        establish_client(stream, true, None, &client_paths, &SilentReporter).unwrap();
+        establish_client(
+            stream,
+            true,
+            None,
+            &client_paths,
+            &SilentReporter,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
 
         assert_eq!(server.join().unwrap(), None);
         assert!(
@@ -958,6 +1092,46 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".xfer-backup-")
         }));
+    }
+
+    #[test]
+    fn no_overwrite_install_does_not_replace_a_raced_file() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("payload");
+        let stage = directory.path().join("stage");
+        fs::write(&destination, b"race winner").unwrap();
+        fs::write(&stage, b"incoming").unwrap();
+
+        assert!(install_staged(&stage, &destination, false).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"race winner");
+    }
+
+    #[test]
+    fn no_overwrite_install_does_not_replace_a_raced_directory() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("payload");
+        let stage = directory.path().join("stage");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("winner.txt"), b"race winner").unwrap();
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("incoming.txt"), b"incoming").unwrap();
+
+        assert!(install_staged(&stage, &destination, false).is_err());
+        assert_eq!(
+            fs::read(destination.join("winner.txt")).unwrap(),
+            b"race winner"
+        );
+        assert!(!destination.join("incoming.txt").exists());
+    }
+
+    #[test]
+    fn backup_cleanup_failure_is_reported_after_install_success() {
+        let directory = tempdir().unwrap();
+        let backup_directory = directory.path().join(".xfer-backup");
+        fs::create_dir(&backup_directory).unwrap();
+        let warning =
+            cleanup_overwrite_backup(&backup_directory.join("missing"), &backup_directory);
+        assert!(warning.is_some_and(|message| message.contains("installed the replacement")));
     }
 
     #[test]
@@ -1083,7 +1257,17 @@ mod tests {
             establish_server(stream, true, None, &server_paths, &SilentReporter)
         });
         let stream = TcpStream::connect(address).unwrap();
-        assert!(establish_client(stream, true, None, &client_paths, &SilentReporter).is_err());
+        assert!(
+            establish_client(
+                stream,
+                true,
+                None,
+                &client_paths,
+                &SilentReporter,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .is_err()
+        );
         assert!(server.join().unwrap().is_ok());
         assert_eq!(
             TrustStore::load(&client_paths)
@@ -1141,6 +1325,46 @@ mod tests {
             })
             .is_err()
         );
+        assert!(validate_secure_token(true, Some("")).is_err());
+        assert!(validate_secure_token(true, Some("secret")).is_ok());
+    }
+
+    #[test]
+    fn receiver_completion_must_match_sent_totals() {
+        let complete = Complete {
+            destination: "payload".into(),
+            file_count: 2,
+            total_bytes: 10,
+        };
+        assert!(validate_completion(&complete, 2, 10).is_ok());
+        assert!(validate_completion(&complete, 1, 10).is_err());
+        assert!(validate_completion(&complete, 2, 9).is_err());
+    }
+
+    #[test]
+    fn connect_timeout_covers_protocol_negotiation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(300));
+        });
+        let client_dir = tempdir().unwrap();
+        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
+        let stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        let result = establish_client(
+            stream,
+            false,
+            None,
+            &client_paths,
+            &SilentReporter,
+            Instant::now() + Duration::from_millis(50),
+        );
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_millis(250));
+        server.join().unwrap();
     }
 
     #[test]

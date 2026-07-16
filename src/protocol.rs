@@ -164,7 +164,10 @@ impl<S: Read + Write> RecordStream<S> {
         if kind == FrameKind::Error {
             let message: String = serde_json::from_slice(&payload)
                 .map_err(|error| XferError::Serialization(error.to_string()))?;
-            return Err(XferError::protocol(format!("remote error: {message}")));
+            return Err(XferError::protocol(format!(
+                "remote error: {}",
+                sanitize_peer_text(&message)
+            )));
         }
         if kind != expected {
             return Err(XferError::protocol(format!(
@@ -284,6 +287,18 @@ impl<S: Read + Write> RecordStream<S> {
     pub fn into_inner(self) -> S {
         self.stream
     }
+}
+
+pub(crate) fn sanitize_peer_text(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len());
+    for character in message.chars() {
+        if character.is_control() {
+            sanitized.extend(character.escape_default());
+        } else {
+            sanitized.push(character);
+        }
+    }
+    sanitized
 }
 
 pub fn client_negotiate<S: Read + Write>(stream: &mut S, secure: bool) -> Result<()> {
@@ -483,6 +498,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("receiver rejected the offer"));
+    }
+
+    #[test]
+    fn remote_error_control_characters_are_escaped() {
+        let cursor = Cursor::new(Vec::new());
+        let mut sender = RecordStream::new(cursor, Role::Client, None, None);
+        sender.send_error("bad\u{1b}[2J\nmessage").unwrap();
+
+        let mut receiver = RecordStream::new(
+            Cursor::new(sender.into_inner().into_inner()),
+            Role::Server,
+            None,
+            None,
+        );
+        let error = receiver
+            .receive_message::<Offer>(FrameKind::Offer)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains('\u{1b}'));
+        assert!(!error.contains('\n'));
+        assert!(error.contains(r"\u{1b}[2J\nmessage"));
     }
 
     #[test]

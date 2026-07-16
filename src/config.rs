@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -14,6 +15,7 @@ use crate::error::{Result, XferError};
 
 const IDENTITY_FILE: &str = "identity.key";
 const PEERS_FILE: &str = "known_peers.json";
+const PEERS_LOCK_FILE: &str = ".known_peers.lock";
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -44,6 +46,10 @@ impl Paths {
 
     pub fn peers(&self) -> PathBuf {
         self.root.join(PEERS_FILE)
+    }
+
+    fn peers_lock(&self) -> PathBuf {
+        self.root.join(PEERS_LOCK_FILE)
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -164,6 +170,19 @@ impl TrustStore {
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
+        let _lock = lock_peer_store(paths)?;
+        self.save_unlocked(paths)
+    }
+
+    pub fn update<T>(paths: &Paths, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let _lock = lock_peer_store(paths)?;
+        let mut store = Self::load(paths)?;
+        let result = operation(&mut store)?;
+        store.save_unlocked(paths)?;
+        Ok(result)
+    }
+
+    fn save_unlocked(&self, paths: &Paths) -> Result<()> {
         paths.ensure()?;
         let encoded = serde_json::to_vec_pretty(self).map_err(|error| {
             XferError::Configuration(format!("could not encode peer store: {error}"))
@@ -179,6 +198,20 @@ impl TrustStore {
             .map_err(|error| XferError::Io(error.error))?;
         Ok(())
     }
+}
+
+fn lock_peer_store(paths: &Paths) -> Result<fs::File> {
+    paths.ensure()?;
+    let path = paths.peers_lock();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    set_private_file_permissions(&path)?;
+    FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
 }
 
 fn write_private_file_noclobber(path: &Path, bytes: &[u8]) -> Result<bool> {
@@ -229,7 +262,10 @@ fn set_private_file_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread};
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
 
     use tempfile::tempdir;
 
@@ -283,6 +319,35 @@ mod tests {
 
         let loaded = TrustStore::load(&paths).unwrap();
         assert_eq!(loaded.get("127.0.0.1:9000").unwrap().fingerprint, "abcd");
+    }
+
+    #[test]
+    fn concurrent_trust_store_updates_are_merged() {
+        let directory = tempdir().unwrap();
+        let paths = Arc::new(Paths::discover(Some(directory.path().to_path_buf())).unwrap());
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|index| {
+                let paths = Arc::clone(&paths);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    TrustStore::update(&paths, |store| {
+                        store.remember(format!("receiver-{index}:9000"), format!("{index:064x}"));
+                        Ok(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let store = TrustStore::load(&paths).unwrap();
+        for index in 0..8 {
+            assert!(store.get(&format!("receiver-{index}:9000")).is_some());
+        }
     }
 
     #[test]
