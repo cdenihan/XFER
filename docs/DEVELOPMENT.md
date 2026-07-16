@@ -112,10 +112,20 @@ day are numbered `.1`, `.2`, `.3`, and so on. The workflow reserves the tag
 atomically before building to avoid duplicate numbers from concurrent pushes,
 and removes its unused reservation if the release fails.
 
-The generated version is passed to Cargo as `XFER_RELEASE_VERSION` and compiled
-into the binary. `xfer --version` and `xfer doctor` report that exact release
-version. Local builds without the variable continue to report the package
-version from `Cargo.toml`.
+The workflow updates three version sources and creates a
+`github-actions[bot]` commit on `main` before building:
+
+- `VERSION` keeps the exact public form, such as `2026.07.16.7`;
+- `Cargo.toml` uses the SemVer-compatible equivalent `2026.7.16-7`;
+- `Cargo.lock` records the same Cargo package version.
+
+Cargo requires exactly three non-zero-padded numeric core components, so the
+public date form cannot be used literally in the package `version` field. The
+CLI reads `VERSION` through `build.rs`, preserving the exact public form for
+`xfer --version`, `xfer doctor`, transfer version checks, tags, and release
+titles. Every platform build and the GitHub release tag use the bot-authored
+version commit rather than the triggering user commit. Pushes made with the
+workflow's `GITHUB_TOKEN` do not start another release workflow.
 
 Each release builds raw binaries and SHA-256 files for:
 

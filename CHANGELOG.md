@@ -40,3 +40,6 @@ All notable changes to XFER are documented here.
   pinned release.
 - Compatible release-version exchange during transfers, with mismatch warnings
   and an interactive update offer on the older CLI.
+- Bot-authored release commits that synchronize the public `VERSION` value with
+  SemVer-compatible `Cargo.toml` and `Cargo.lock` versions before building,
+  tagging, and publishing each release.
