@@ -123,9 +123,12 @@ Cargo requires exactly three non-zero-padded numeric core components, so the
 public date form cannot be used literally in the package `version` field. The
 CLI reads `VERSION` through `build.rs`, preserving the exact public form for
 `xfer --version`, `xfer doctor`, transfer version checks, tags, and release
-titles. Every platform build and the GitHub release tag use the bot-authored
-version commit rather than the triggering user commit. Pushes made with the
-workflow's `GITHUB_TOKEN` do not start another release workflow.
+titles. The push-triggered workflow stops after creating the bot commit and
+reserved tag. It then dispatches a separate `Release` workflow at that tag, so
+the build run itself, every platform checkout, and the GitHub release are all
+attached to the bot-authored commit rather than the triggering user commit.
+Pushes made with the workflow's `GITHUB_TOKEN` do not recursively start the
+push-triggered workflow.
 
 Each release builds raw binaries and SHA-256 files for:
 
