@@ -259,6 +259,10 @@ impl<S: Read + Write> RecordStream<S> {
         self.send_message(FrameKind::Error, &message.to_string())
     }
 
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
     pub fn into_inner(self) -> S {
         self.stream
     }

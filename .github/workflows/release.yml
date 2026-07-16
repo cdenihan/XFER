@@ -74,7 +74,10 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}"
-          openssl dgst -sha256 -r "dist/${{ matrix.artifact }}" > "dist/${{ matrix.artifact }}.sha256"
+          (
+            cd dist
+            openssl dgst -sha256 -r "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          )
 
       - uses: actions/upload-artifact@v7.0.1
         with:

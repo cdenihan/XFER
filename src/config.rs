@@ -61,31 +61,25 @@ impl Identity {
     pub fn load_or_create(paths: &Paths) -> Result<Self> {
         paths.ensure()?;
         let path = paths.identity();
-        if path.exists() {
-            let mut bytes = fs::read(&path)?;
-            if bytes.len() != 32 {
-                bytes.zeroize();
-                return Err(XferError::Configuration(format!(
-                    "{} must contain exactly 32 bytes",
-                    path.display()
-                )));
+        loop {
+            match fs::read(&path) {
+                Ok(bytes) => return Self::from_bytes(bytes, &path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            let mut secret_bytes = [0_u8; 32];
-            secret_bytes.copy_from_slice(&bytes);
-            bytes.zeroize();
-            let secret = StaticSecret::from(secret_bytes);
-            secret_bytes.zeroize();
-            return Ok(Self { secret });
-        }
 
-        let mut secret_bytes = [0_u8; 32];
-        getrandom::fill(&mut secret_bytes).map_err(|error| {
-            XferError::Configuration(format!("could not generate receiver identity: {error}"))
-        })?;
-        write_private_file(&path, &secret_bytes)?;
-        let secret = StaticSecret::from(secret_bytes);
-        secret_bytes.zeroize();
-        Ok(Self { secret })
+            let mut secret_bytes = [0_u8; 32];
+            getrandom::fill(&mut secret_bytes).map_err(|error| {
+                XferError::Configuration(format!("could not generate receiver identity: {error}"))
+            })?;
+            let created = write_private_file_noclobber(&path, &secret_bytes)?;
+            if created {
+                let secret = StaticSecret::from(secret_bytes);
+                secret_bytes.zeroize();
+                return Ok(Self { secret });
+            }
+            secret_bytes.zeroize();
+        }
     }
 
     pub fn secret(&self) -> &StaticSecret {
@@ -94,6 +88,22 @@ impl Identity {
 
     pub fn public(&self) -> PublicKey {
         PublicKey::from(&self.secret)
+    }
+
+    fn from_bytes(mut bytes: Vec<u8>, path: &Path) -> Result<Self> {
+        if bytes.len() != 32 {
+            bytes.zeroize();
+            return Err(XferError::Configuration(format!(
+                "{} must contain exactly 32 bytes",
+                path.display()
+            )));
+        }
+        let mut secret_bytes = [0_u8; 32];
+        secret_bytes.copy_from_slice(&bytes);
+        bytes.zeroize();
+        let secret = StaticSecret::from(secret_bytes);
+        secret_bytes.zeroize();
+        Ok(Self { secret })
     }
 }
 
@@ -171,7 +181,7 @@ impl TrustStore {
     }
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_private_file_noclobber(path: &Path, bytes: &[u8]) -> Result<bool> {
     let parent = path
         .parent()
         .ok_or_else(|| XferError::Configuration("identity path has no parent".into()))?;
@@ -180,10 +190,11 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     temporary.flush()?;
     temporary.as_file().sync_all()?;
     set_private_file_permissions(temporary.path())?;
-    temporary
-        .persist(path)
-        .map_err(|error| XferError::Io(error.error))?;
-    Ok(())
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(XferError::Io(error.error)),
+    }
 }
 
 fn unix_timestamp() -> u64 {
@@ -218,6 +229,8 @@ fn set_private_file_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, thread};
+
     use tempfile::tempdir;
 
     use super::*;
@@ -229,6 +242,35 @@ mod tests {
         let first = Identity::load_or_create(&paths).unwrap().public();
         let second = Identity::load_or_create(&paths).unwrap().public();
         assert_eq!(first.as_bytes(), second.as_bytes());
+    }
+
+    #[test]
+    fn concurrent_identity_creation_keeps_one_winner() {
+        let directory = tempdir().unwrap();
+        let paths = Arc::new(Paths::discover(Some(directory.path().to_path_buf())).unwrap());
+        let handles = (0..8)
+            .map(|_| {
+                let paths = Arc::clone(&paths);
+                thread::spawn(move || Identity::load_or_create(&paths).unwrap().public())
+            })
+            .collect::<Vec<_>>();
+        let identities = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(
+            identities
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() == pair[1].as_bytes())
+        );
+        assert_eq!(
+            Identity::load_or_create(&paths)
+                .unwrap()
+                .public()
+                .as_bytes(),
+            identities[0].as_bytes()
+        );
     }
 
     #[test]

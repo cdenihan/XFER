@@ -7,6 +7,7 @@ use std::{
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::{
@@ -20,6 +21,22 @@ pub struct PlannedEntry {
     pub relative: PathBuf,
     pub kind: EntryKind,
     pub size: u64,
+    identity: Option<FileIdentity>,
+    canonical_source: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    attributes: u32,
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +75,8 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                 relative: PathBuf::from(root_name),
                 kind: EntryKind::File,
                 size: metadata.len(),
+                identity: Some(file_identity(&metadata)),
+                canonical_source: Some(fs::canonicalize(input)?),
             }],
             total_bytes: metadata.len(),
             file_count: 1,
@@ -138,17 +157,17 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                 relative: relative.to_path_buf(),
                 kind: EntryKind::Directory,
                 size: 0,
+                identity: None,
+                canonical_source: None,
             });
         } else if file_type.is_file() {
-            let size = entry
-                .metadata()
-                .map_err(|error| {
-                    XferError::invalid_input(format!(
-                        "could not inspect {}: {error}",
-                        entry.path().display()
-                    ))
-                })?
-                .len();
+            let metadata = entry.metadata().map_err(|error| {
+                XferError::invalid_input(format!(
+                    "could not inspect {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
+            let size = metadata.len();
             total_bytes = total_bytes
                 .checked_add(size)
                 .ok_or_else(|| XferError::invalid_input("transfer size exceeds u64"))?;
@@ -158,6 +177,8 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
                 relative: relative.to_path_buf(),
                 kind: EntryKind::File,
                 size,
+                identity: Some(file_identity(&metadata)),
+                canonical_source: Some(fs::canonicalize(entry.path())?),
             });
         } else {
             skipped_count += 1;
@@ -270,7 +291,93 @@ pub fn path_to_wire(path: &Path) -> Result<String> {
 }
 
 pub(crate) fn portable_path_key(path: &Path) -> Result<String> {
-    Ok(path_to_wire(path)?.to_lowercase())
+    Ok(path_to_wire(path)?
+        .nfd()
+        .flat_map(char::to_lowercase)
+        .nfd()
+        .collect())
+}
+
+pub(crate) fn open_planned_file(entry: &PlannedEntry, follow_links: bool) -> Result<fs::File> {
+    let planned_canonical = entry
+        .canonical_source
+        .as_ref()
+        .ok_or_else(|| XferError::security("planned file is missing its canonical path"))?;
+    if fs::canonicalize(&entry.source)? != *planned_canonical {
+        return Err(XferError::security(format!(
+            "{} no longer resolves to its planned location",
+            entry.source.display()
+        )));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options, follow_links);
+    let file = options.open(&entry.source).map_err(|error| {
+        XferError::security(format!(
+            "could not safely open planned file {}: {error}",
+            entry.source.display()
+        ))
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len() != entry.size
+        || entry.identity.as_ref() != Some(&file_identity(&metadata))
+        || fs::canonicalize(&entry.source)? != *planned_canonical
+    {
+        return Err(XferError::security(format!(
+            "{} changed after the transfer plan was created",
+            entry.source.display()
+        )));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn configure_no_follow(options: &mut fs::OpenOptions, follow_links: bool) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if !follow_links {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+}
+
+#[cfg(windows)]
+fn configure_no_follow(options: &mut fs::OpenOptions, follow_links: bool) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    if !follow_links {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_no_follow(_options: &mut fs::OpenOptions, _follow_links: bool) {}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    use std::os::windows::fs::MetadataExt;
+
+    FileIdentity {
+        attributes: metadata.file_attributes(),
+        creation_time: metadata.creation_time(),
+        last_write_time: metadata.last_write_time(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_metadata: &fs::Metadata) -> FileIdentity {
+    FileIdentity {}
 }
 
 fn build_excludes(patterns: &[String]) -> Result<GlobSet> {
@@ -389,5 +496,26 @@ mod tests {
             portable_path_key(Path::new("Readme")).unwrap(),
             portable_path_key(Path::new("README")).unwrap()
         );
+        assert_eq!(
+            portable_path_key(Path::new("\u{e9}.txt")).unwrap(),
+            portable_path_key(Path::new("e\u{301}.txt")).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planned_file_open_rejects_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.txt");
+        let outside = directory.path().join("outside.txt");
+        fs::write(&source, b"planned").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        let plan = build_plan(&source, &[], false).unwrap();
+        fs::remove_file(&source).unwrap();
+        symlink(&outside, &source).unwrap();
+
+        assert!(open_planned_file(&plan.entries[0], false).is_err());
     }
 }

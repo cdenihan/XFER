@@ -8,6 +8,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::{Result, XferError};
 
+const IO_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
     let addresses = (host, port)
         .to_socket_addrs()
@@ -73,8 +75,18 @@ pub fn bind(host: &str, port: u16) -> Result<TcpListener> {
 
 pub fn configure_stream(stream: &TcpStream) -> Result<()> {
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(120)))?;
+    restore_read_timeout(stream)?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(())
+}
+
+pub fn suspend_read_timeout(stream: &TcpStream) -> Result<()> {
+    stream.set_read_timeout(None)?;
+    Ok(())
+}
+
+pub fn restore_read_timeout(stream: &TcpStream) -> Result<()> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
     Ok(())
 }
 

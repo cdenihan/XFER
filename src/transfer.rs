@@ -16,8 +16,8 @@ use crate::{
     crypto::{derive_session_keys, display_fingerprint, fingerprint, sas},
     error::{Result, XferError},
     filesystem::{
-        TransferPlan, build_plan, choose_destination, path_to_wire, portable_path_key,
-        safe_relative_path, validate_wire_name,
+        TransferPlan, build_plan, choose_destination, open_planned_file, path_to_wire,
+        portable_path_key, safe_relative_path, validate_wire_name,
     },
     net,
     protocol::{
@@ -113,7 +113,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
             continue;
         }
 
-        let mut file = File::open(&entry.source)?;
+        let mut file = open_planned_file(entry, options.follow_links)?;
         let mut hash = Sha256::new();
         loop {
             let count = read_retry(&mut file, &mut buffer)?;
@@ -214,6 +214,7 @@ fn receive_transfer(
     peer: SocketAddr,
 ) -> Result<TransferSummary> {
     let offer: Offer = session.receive_message(FrameKind::Offer)?;
+    net::restore_read_timeout(session.get_mut())?;
     validate_offer(&offer)?;
     session.send_message(FrameKind::Decision, &Decision::Accept)?;
     reporter.status(&format!(
@@ -345,10 +346,7 @@ fn receive_transfer(
         ));
     }
 
-    if options.overwrite && destination.exists() {
-        remove_existing(&destination)?;
-    }
-    fs::rename(&stage_path, &destination)?;
+    install_staged(&stage_path, &destination, options.overwrite)?;
     session.send_message(
         FrameKind::Complete,
         &Complete {
@@ -440,9 +438,9 @@ fn establish_client(
         if !reporter.confirm_peer(&prompt)? {
             return Err(XferError::security("peer was not trusted"));
         }
-        trust.remember(endpoint, fingerprint);
-        trust.save(paths)?;
     }
+    trust.remember(endpoint, fingerprint);
+    trust.save(paths)?;
 
     Ok(session)
 }
@@ -498,6 +496,7 @@ fn establish_server(
     );
     session.receive_message::<()>(FrameKind::Ready)?;
     session.send_message(FrameKind::Ready, &())?;
+    net::suspend_read_timeout(session.get_mut())?;
     Ok(session)
 }
 
@@ -553,6 +552,47 @@ fn remove_existing(path: &Path) -> Result<()> {
     } else {
         fs::remove_file(path)?;
     }
+    Ok(())
+}
+
+fn install_staged(stage: &Path, destination: &Path, overwrite: bool) -> Result<()> {
+    if !overwrite || !destination.exists() {
+        fs::rename(stage, destination)?;
+        return Ok(());
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| XferError::invalid_input("destination has no parent directory"))?;
+    let backup_directory = tempfile::Builder::new()
+        .prefix(".xfer-backup-")
+        .tempdir_in(parent)?
+        .keep();
+    let backup = backup_directory.join("original");
+
+    if let Err(error) = fs::rename(destination, &backup) {
+        let _ = fs::remove_dir(&backup_directory);
+        return Err(error.into());
+    }
+    if let Err(install_error) = fs::rename(stage, destination) {
+        return match fs::rename(&backup, destination) {
+            Ok(()) => {
+                let _ = fs::remove_dir(&backup_directory);
+                Err(install_error.into())
+            }
+            Err(rollback_error) => Err(XferError::Io(std::io::Error::new(
+                install_error.kind(),
+                format!(
+                    "could not install {} ({install_error}); the previous destination remains at {} because rollback failed: {rollback_error}",
+                    destination.display(),
+                    backup.display()
+                ),
+            ))),
+        };
+    }
+
+    remove_existing(&backup)?;
+    fs::remove_dir(&backup_directory)?;
     Ok(())
 }
 
@@ -765,5 +805,90 @@ mod tests {
         assert!(result.is_err());
         assert!(server.join().unwrap().is_err());
         assert!(!client_paths.peers().exists());
+    }
+
+    #[test]
+    fn known_peer_reconnect_updates_last_seen_and_suspends_server_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_dir = tempdir().unwrap();
+        let client_dir = tempdir().unwrap();
+        let server_paths = Paths::discover(Some(server_dir.path().to_path_buf())).unwrap();
+        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
+        let server_identity = Identity::load_or_create(&server_paths).unwrap();
+        let server_fingerprint = fingerprint(server_identity.public().as_bytes());
+        client_paths.ensure().unwrap();
+        fs::write(
+            client_paths.peers(),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "peers": {
+                    address.to_string(): {
+                        "fingerprint": server_fingerprint,
+                        "first_seen": 0,
+                        "last_seen": 0,
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut session =
+                establish_server(stream, true, None, &server_paths, &SilentReporter).unwrap();
+            session.get_mut().read_timeout().unwrap()
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        establish_client(stream, true, None, &client_paths, &SilentReporter).unwrap();
+
+        assert_eq!(server.join().unwrap(), None);
+        assert!(
+            TrustStore::load(&client_paths)
+                .unwrap()
+                .get(&address.to_string())
+                .unwrap()
+                .last_seen
+                > 0
+        );
+    }
+
+    #[test]
+    fn overwrite_install_replaces_the_previous_destination() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("payload");
+        let stage = directory.path().join("stage");
+        fs::write(&destination, b"old").unwrap();
+        fs::write(&stage, b"new").unwrap();
+
+        install_staged(&stage, &destination, true).unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"new");
+        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".xfer-backup-")
+        }));
+    }
+
+    #[test]
+    fn failed_overwrite_install_restores_the_previous_destination() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("payload");
+        let missing_stage = directory.path().join("missing-stage");
+        fs::write(&destination, b"old").unwrap();
+
+        assert!(install_staged(&missing_stage, &destination, true).is_err());
+
+        assert_eq!(fs::read(&destination).unwrap(), b"old");
+        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".xfer-backup-")
+        }));
     }
 }

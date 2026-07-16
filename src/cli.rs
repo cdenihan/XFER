@@ -283,7 +283,18 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
                 anyhow::bail!("no remembered peer named {endpoint}");
             }
             store.save(paths)?;
-            println!("Forgot {endpoint}.");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "ok",
+                        "action": "forgot",
+                        "endpoint": endpoint,
+                    })
+                );
+            } else {
+                println!("Forgot {endpoint}.");
+            }
         }
         PeerCommand::Clear { yes } => {
             if !yes {
@@ -291,7 +302,17 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
             }
             store.clear();
             store.save(paths)?;
-            println!("Forgot all peers.");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "ok",
+                        "action": "cleared",
+                    })
+                );
+            } else {
+                println!("Forgot all peers.");
+            }
         }
     }
     Ok(())
