@@ -1,16 +1,58 @@
 [package]
 name = "xfer"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Secure, cross-platform file and directory transfer for local networks"
+repository = "https://github.com/cdenihan/XFER"
+readme = "README.md"
+keywords = ["file-transfer", "lan", "encryption", "cli", "tui"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-sha2 = "0.11"
-hmac = "0.13"
-rand = "0.8.5"
-tar = "0.4"
-walkdir = "2.5"
-glob = "0.3"
+anyhow = "1.0"
+chacha20poly1305 = "0.11"
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.6"
+crossterm = "0.29"
+dirs = "6.0"
+globset = "0.4"
+getrandom = "0.4"
 hex = "0.4"
-chacha20poly1305 = "0.10"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.13"
+if-addrs = "0.15"
+indicatif = "0.18"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+socket2 = "0.6"
+tempfile = "3.27"
+thiserror = "2.0"
+walkdir = "2.5"
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+zeroize = "1.9"
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+trivially_copy_pass_by_ref = "allow"
