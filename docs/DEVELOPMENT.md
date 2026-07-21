@@ -103,6 +103,15 @@ runtime, installer generation, cross-platform CI, and release jobs. The local
 workflow files are intentionally thin callers; XFER-specific commands and
 transfer behavior remain in this repository.
 
+The toolkit is public, so normal Cargo, GitHub Actions, and Dependabot access
+does not require credentials. The workflow callers still pass the optional
+`RUST_CLI_RELEASE_TOKEN` Actions secret as `dependency_token`. A private fork,
+or a consumer with private Git dependencies, can provide a fine-grained token
+with read-only Contents access under that name. Public consumers can leave the
+secret unset. If Dependabot also needs private Git access, configure the same
+name as a Dependabot secret and add a matching `git` registry entry to
+`.github/dependabot.yml`.
+
 The toolkit dependency and reusable workflow references must move together.
 Dependabot monitors Cargo and GitHub Actions separately, so review both update
 pull requests as one toolkit release before merging.
