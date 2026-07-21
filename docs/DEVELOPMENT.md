@@ -34,7 +34,6 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 cargo build --release --locked
 cargo audit
-tests/installers/install-sh.sh
 ```
 
 Install the audit command with `cargo install cargo-audit --locked`.
@@ -97,6 +96,26 @@ Prefer a new typed frame or a versioned structured field. Keep these invariants:
 
 A breaking wire change increments `protocol::VERSION` and the record version.
 
+## Shared distribution infrastructure
+
+XFER consumes `cdenihan/rust-cli-release` at an immutable tag for its self-update
+runtime, installer generation, cross-platform CI, and release jobs. The local
+workflow files are intentionally thin callers; XFER-specific commands and
+transfer behavior remain in this repository.
+
+The toolkit is public, so normal Cargo, GitHub Actions, and Dependabot access
+does not require credentials. The workflow callers still pass the optional
+`RUST_CLI_RELEASE_TOKEN` Actions secret as `dependency_token`. A private fork,
+or a consumer with private Git dependencies, can provide a fine-grained token
+with read-only Contents access under that name. Public consumers can leave the
+secret unset. If Dependabot also needs private Git access, configure the same
+name as a Dependabot secret and add a matching `git` registry entry to
+`.github/dependabot.yml`.
+
+The toolkit dependency and reusable workflow references must move together.
+Dependabot monitors Cargo and GitHub Actions separately, so review both update
+pull requests as one toolkit release before merging.
+
 ## CI and releases
 
 Pull requests run format, Clippy, tests on all three desktop operating systems,
@@ -112,7 +131,7 @@ day are numbered `.1`, `.2`, `.3`, and so on. The workflow reserves the tag
 atomically before building to avoid duplicate numbers from concurrent pushes,
 and removes its unused reservation if the release fails.
 
-The workflow updates three version sources and creates a
+The shared prepare workflow updates three version sources and creates a
 `github-actions[bot]` commit on `main` before building:
 
 - `VERSION` keeps the exact public form, such as `2026.07.16.7`;
@@ -136,5 +155,6 @@ Each release builds raw binaries and SHA-256 files for:
 - macOS x86_64 and Apple Silicon;
 - Windows x86_64 and ARM64.
 
-Release builds use `--locked`. The release also publishes `install.sh`,
-`install.ps1`, and checksums for both scripts.
+Release builds use `--locked`. The shared publish workflow renders XFER-branded
+`install.sh` and `install.ps1`, publishes checksums for both scripts, and adds a
+`VERSION` asset used to make already-current update checks a no-op.

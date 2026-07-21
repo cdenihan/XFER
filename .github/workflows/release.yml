@@ -2,8 +2,7 @@ name: Prepare Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   actions: write
@@ -15,92 +14,14 @@ concurrency:
 
 jobs:
   prepare:
-    name: Create and dispatch release commit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.0
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Generate daily release version
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          release_date="$(date -u +'%Y.%m.%d')"
-          source_commit="$(git rev-parse HEAD)"
-          for attempt in {1..10}; do
-            release_version="$(
-              gh api --paginate \
-                "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${release_date}." \
-                --jq '.[].ref' |
-                sh scripts/next-release-version.sh "$release_date"
-            )"
-            if gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f "ref=refs/tags/v${release_version}" \
-              -f "sha=${source_commit}" >/dev/null 2>&1; then
-              break
-            fi
-            if [[ "$attempt" == "10" ]]; then
-              echo "Could not reserve a release number after $attempt attempts." >&2
-              exit 1
-            fi
-          done
-          echo "version=${release_version}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${release_version}" >> "$GITHUB_OUTPUT"
-          echo "Release version: ${release_version}"
-
-      - name: Update repository versions
-        env:
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-        shell: bash
-        run: |
-          cargo_version="$(
-            python3 scripts/set-release-version.py "$RELEASE_VERSION"
-          )"
-          cargo metadata --locked --no-deps --format-version 1 >/dev/null
-          echo "Cargo version: ${cargo_version}"
-
-      - name: Commit and push release version
-        id: commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock VERSION
-          git commit --allow-empty -m "chore(release): XFER ${RELEASE_VERSION}"
-          git push origin HEAD:main
-
-          release_commit="$(git rev-parse HEAD)"
-          gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
-            -f "sha=${release_commit}" \
-            -F force=true >/dev/null
-          echo "commit=${release_commit}" >> "$GITHUB_OUTPUT"
-          echo "Release commit: ${release_commit}"
-
-      - name: Dispatch build and publish workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ steps.commit.outputs.commit }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-        shell: bash
-        run: |
-          if gh workflow run publish-release.yml \
-            --ref "$RELEASE_TAG" \
-            -f "version=${RELEASE_VERSION}" \
-            -f "tag=${RELEASE_TAG}" \
-            -f "commit=${RELEASE_COMMIT}"; then
-            echo "Dispatched release build at ${RELEASE_COMMIT}."
-          else
-            gh api --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}"
-            exit 1
-          fi
+    uses: cdenihan/rust-cli-release/.github/workflows/prepare-release.yml@v1.1.2
+    with:
+      binary-name: xfer
+      display-name: XFER
+      cargo-package: xfer
+      environment-prefix: XFER
+      version-mode: calendar
+      version-file: VERSION
+      publish-workflow: publish-release.yml
+    secrets:
+      dependency_token: ${{ secrets.RUST_CLI_RELEASE_TOKEN }}

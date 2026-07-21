@@ -23,11 +23,14 @@ xfer update
 xfer update --version 2026.07.16.2
 ```
 
-The command resolves the running executable, downloads the latest platform
-installer and its checksum, verifies SHA-256, and asks that installer to replace
-XFER in the same directory. On Windows, the command starts a helper that waits
-for the running `xfer.exe` process to exit before completing the replacement.
-Use `--version` to pin the installation to a specific published release.
+The command resolves the running executable and reads the latest release's
+`VERSION` asset. If that version is already installed, XFER reports that it is
+current and leaves the executable untouched. Otherwise it downloads the latest
+platform installer and checksum, verifies SHA-256, and asks that installer to
+replace XFER in the same directory. On Windows, the command starts a helper that
+waits for the running `xfer.exe` process to exit before completing the
+replacement. Use `--version` to pin the installation to a specific published
+release; requesting the installed version is also a no-op.
 
 During transfers, current XFER releases exchange their release versions. When
 they differ, the older interactive CLI offers to update to the newer peer's
