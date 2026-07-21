@@ -1180,6 +1180,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rust-cli-release"
+version = "1.1.1"
+source = "git+https://github.com/cdenihan/rust-cli-release?tag=v1.1.1#1abfbd42a16e0c062c167718d0e8553fb5011349"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1700,6 +1712,7 @@ dependencies = [
  "libc",
  "predicates",
  "ratatui",
+ "rust-cli-release",
  "serde",
  "serde_json",
  "sha2",

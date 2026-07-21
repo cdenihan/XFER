@@ -3,8 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -14,97 +13,11 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2.9.1
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-targets
-      - run: sh tests/release-version.sh
-
-  security:
-    name: RustSec audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  native:
-    name: Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.1
-      - run: cargo test --locked --all-targets
-
-  installers:
-    name: Installer (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7.0.0
-      - name: Test Linux/macOS installer
-        if: runner.os != 'Windows'
-        shell: sh
-        run: tests/installers/install-sh.sh
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.os == 'Windows'
-      - uses: Swatinem/rust-cache@v2.9.1
-        if: runner.os == 'Windows'
-      - name: Build Windows installer fixture
-        if: runner.os == 'Windows'
-        run: cargo build --locked
-      - name: Test Windows installer
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: tests/installers/install-ps1.ps1
-
-  cross-check:
-    name: Check ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.9.1
-        with:
-          key: ${{ matrix.target }}
-      - run: cargo check --locked --target ${{ matrix.target }}
+  shared:
+    uses: cdenihan/rust-cli-release/.github/workflows/rust-ci.yml@v1.1.1
+    with:
+      binary-name: xfer
+      display-name: XFER
+      environment-prefix: XFER
+    secrets:
+      dependency_token: ${{ secrets.RUST_CLI_RELEASE_TOKEN }}

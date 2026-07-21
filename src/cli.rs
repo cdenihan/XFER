@@ -530,6 +530,12 @@ fn handle_version_mismatch(
 fn print_update_summary(summary: &update::UpdateSummary, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string(summary)?);
+    } else if summary.status == "current" {
+        println!(
+            "XFER {} is already up to date at {}",
+            summary.previous_version,
+            summary.executable.display()
+        );
     } else if let Some(installed_version) = &summary.installed_version {
         println!(
             "Updated XFER {} → {} at {}",

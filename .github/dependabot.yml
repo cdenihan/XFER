@@ -1,9 +1,18 @@
 version: 2
+registries:
+  rust-cli-release:
+    type: git
+    url: https://github.com
+    username: x-access-token
+    password: ${{ secrets.RUST_CLI_RELEASE_TOKEN }}
+
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    registries:
+      - rust-cli-release
     groups:
       rust-dependencies:
         patterns:

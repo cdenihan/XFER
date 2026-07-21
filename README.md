@@ -24,6 +24,7 @@ The v4 rewrite is a library-first Rust application with a
 - Human progress, newline-delimited JSON events, and a live TUI
 - Peer-management, diagnostics, and shell-completion commands
 - A checksum-verified `xfer update` command that replaces the active installation
+- No-op update checks when the installed release is already current
 - Native CI on Linux, macOS, and Windows plus cross-target checks
 
 ## Install
@@ -144,8 +145,10 @@ xfer update
 xfer update --version 2026.07.16.2
 ```
 
-The updater downloads the latest installer and its SHA-256 file, verifies the
-installer, and then uses it to replace the currently running XFER installation.
+The updater reads the latest release's small `VERSION` marker first. If the
+installed release is current it exits without replacing the executable;
+otherwise it verifies the installer and uses it to replace the currently
+running XFER installation.
 On Windows, replacement finishes immediately after the current process exits.
 Installations in protected system directories may require reinstalling to a
 user-writable directory first.
