@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   prepare:
-    uses: cdenihan/rust-cli-release/.github/workflows/prepare-release.yml@v1.3.0
+    uses: cdenihan/rust-cli-release/.github/workflows/prepare-release.yml@v1.3.1
     with:
       binary-name: xfer
       display-name: XFER

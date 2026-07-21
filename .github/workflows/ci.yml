@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   shared:
-    uses: cdenihan/rust-cli-release/.github/workflows/rust-ci.yml@v1.3.0
+    uses: cdenihan/rust-cli-release/.github/workflows/rust-ci.yml@v1.3.1
     with:
       binary-name: xfer
       display-name: XFER
