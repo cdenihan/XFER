@@ -51,6 +51,15 @@ curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh 
 The default destination is `~/.local/bin/xfer`. If that directory is not in
 `PATH`, the installer prints the directory to add.
 
+On Linux, the installer selects the musl binary by default. This avoids a
+dependency on the host system's glibc version while retaining the GNU builds
+for users who need them. Select the GNU binary explicitly with `--libc gnu`:
+
+```console
+curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh \
+  | sh -s -- --libc gnu
+```
+
 Pin a release or choose another destination:
 
 ```console
@@ -58,9 +67,9 @@ curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh 
   | sh -s -- --version v2026.07.16.2 --install-dir "$HOME/bin"
 ```
 
-Equivalent environment variables are `XFER_VERSION` and `XFER_INSTALL_DIR`.
-The script requires `curl` or `wget`, plus one of `sha256sum`, `shasum`, or
-`openssl`.
+Equivalent environment variables are `XFER_VERSION`, `XFER_INSTALL_DIR`, and
+`XFER_LIBC`. Set `XFER_LIBC=gnu` for the GNU override. The script requires
+`curl` or `wget`, plus one of `sha256sum`, `shasum`, or `openssl`.
 
 ## Windows
 

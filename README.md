@@ -41,11 +41,12 @@ Windows PowerShell:
 irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 | iex
 ```
 
-The installers detect the operating system, CPU architecture, and Linux libc;
-download the matching release binary; verify its SHA-256 file; and replace an
-existing installation atomically. See [docs/INSTALLATION.md](docs/INSTALLATION.md)
-for version pinning, install locations, PATH behavior, mirrors, and manual
-installation.
+The installers detect the operating system and CPU architecture, default to
+musl on Linux to avoid host glibc compatibility issues, download the matching
+release binary, verify its SHA-256 file, and replace an existing installation
+atomically. GNU Linux builds remain available through `--libc gnu`. See
+[docs/INSTALLATION.md](docs/INSTALLATION.md) for version pinning, install
+locations, PATH behavior, mirrors, and manual installation.
 
 After the first install, update that same executable in place:
 
