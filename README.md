@@ -4,8 +4,8 @@ XFER is a secure, direct file-transfer tool for Windows, macOS, and Linux. It
 sends a file or directory over a single TCP connection, with no account, cloud
 service, or server deployment.
 
-The v4 rewrite is a library-first Rust application with a
-[clap](https://github.com/clap-rs/clap) CLI and a
+The CLI is a Rust application with
+[clap](https://github.com/clap-rs/clap) CLI and
 [Ratatui](https://github.com/ratatui/ratatui) terminal interface.
 
 ## Highlights
