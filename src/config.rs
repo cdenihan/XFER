@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rust_cli_release::{LockedJsonStore, SecureDir};
+use rust_cli_toolkit::{LockedJsonStore, SecureDir};
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -17,7 +17,7 @@ const PEERS_FILE: &str = "known_peers.json";
 /// `~/.xfer`, or an explicit override.
 ///
 /// The private-directory, atomic-write, and advisory-lock mechanics live in
-/// `rust_cli_release::SecureDir`; this type is the XFER-specific naming on top
+/// `rust_cli_toolkit::SecureDir`; this type is the XFER-specific naming on top
 /// of it.
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -177,7 +177,7 @@ impl TrustStore {
             Ok(value) => Ok(value),
             Err(error) => {
                 failure = Some(error);
-                Err(rust_cli_release::Error::Configuration(
+                Err(rust_cli_toolkit::Error::Configuration(
                     "peer store was left unchanged".into(),
                 ))
             }

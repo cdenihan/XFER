@@ -98,14 +98,14 @@ A breaking wire change increments `protocol::VERSION` and the record version.
 
 ## Shared distribution infrastructure
 
-XFER consumes `cdenihan/rust-cli-release` at an immutable tag for its self-update
+XFER consumes `cdenihan/rust-cli-toolkit` at an immutable tag for its self-update
 runtime, installer generation, cross-platform CI, and release jobs. The local
 workflow files are intentionally thin callers; XFER-specific commands and
 transfer behavior remain in this repository.
 
 The toolkit is public, so normal Cargo, GitHub Actions, and Dependabot access
 does not require credentials. The workflow callers still pass the optional
-`RUST_CLI_RELEASE_TOKEN` Actions secret as `dependency_token`. A private fork,
+`RUST_CLI_TOOLKIT_TOKEN` Actions secret as `dependency_token`. A private fork,
 or a consumer with private Git dependencies, can provide a fine-grained token
 with read-only Contents access under that name. Public consumers can leave the
 secret unset. If Dependabot also needs private Git access, configure the same

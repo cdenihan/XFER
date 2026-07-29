@@ -1180,9 +1180,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "rust-cli-release"
-version = "1.6.0"
-source = "git+https://github.com/cdenihan/rust-cli-release?tag=v1.6.0#9d28bcfc2fb6ad12fb3435a4cc13404909fd972e"
+name = "rust-cli-toolkit"
+version = "2.0.0"
+source = "git+https://github.com/cdenihan/rust-cli-toolkit?tag=v2.0.0#ce99f2d94013738361ddc648ebe5302217fad5cf"
 dependencies = [
  "dirs",
  "fs2",
@@ -1725,7 +1725,7 @@ dependencies = [
  "libc",
  "predicates",
  "ratatui",
- "rust-cli-release",
+ "rust-cli-toolkit",
  "serde",
  "serde_json",
  "sha2",
