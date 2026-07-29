@@ -1,12 +1,10 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fs2::FileExt;
+use rust_cli_release::{LockedJsonStore, SecureDir};
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -15,47 +13,45 @@ use crate::error::{Result, XferError};
 
 const IDENTITY_FILE: &str = "identity.key";
 const PEERS_FILE: &str = "known_peers.json";
-const PEERS_LOCK_FILE: &str = ".known_peers.lock";
 
+/// `~/.xfer`, or an explicit override.
+///
+/// The private-directory, atomic-write, and advisory-lock mechanics live in
+/// `rust_cli_release::SecureDir`; this type is the XFER-specific naming on top
+/// of it.
 #[derive(Clone, Debug)]
 pub struct Paths {
-    root: PathBuf,
+    directory: SecureDir,
 }
 
 impl Paths {
     pub fn discover(override_root: Option<PathBuf>) -> Result<Self> {
-        if let Some(root) = override_root {
-            return Ok(Self { root });
-        }
-
-        let home = dirs::home_dir().ok_or_else(|| {
-            XferError::Configuration("could not determine the home directory".into())
-        })?;
         Ok(Self {
-            root: home.join(".xfer"),
+            directory: SecureDir::discover("xfer", override_root)?,
         })
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        self.directory.root()
     }
 
     pub fn identity(&self) -> PathBuf {
-        self.root.join(IDENTITY_FILE)
+        self.directory.path(IDENTITY_FILE)
     }
 
     pub fn peers(&self) -> PathBuf {
-        self.root.join(PEERS_FILE)
-    }
-
-    fn peers_lock(&self) -> PathBuf {
-        self.root.join(PEERS_LOCK_FILE)
+        self.directory.path(PEERS_FILE)
     }
 
     pub fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.root)?;
-        set_private_dir_permissions(&self.root)?;
+        self.directory.ensure()?;
         Ok(())
+    }
+
+    /// The peer store, which locks around its own read-modify-write cycle so
+    /// concurrent transfers cannot lose each other's entries.
+    fn peer_store(&self) -> LockedJsonStore<TrustStore> {
+        LockedJsonStore::new(self.directory.clone(), PEERS_FILE)
     }
 }
 
@@ -68,17 +64,19 @@ impl Identity {
         paths.ensure()?;
         let path = paths.identity();
         loop {
-            match fs::read(&path) {
-                Ok(bytes) => return Self::from_bytes(bytes, &path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            if let Some(bytes) = paths.directory.read(IDENTITY_FILE)? {
+                return Self::from_bytes(bytes, &path);
             }
 
             let mut secret_bytes = [0_u8; 32];
             getrandom::fill(&mut secret_bytes).map_err(|error| {
                 XferError::Configuration(format!("could not generate receiver identity: {error}"))
             })?;
-            let created = write_private_file_noclobber(&path, &secret_bytes)?;
+            // Racing processes must agree on one identity, so the loser of the
+            // create reads back the winner's key rather than overwriting it.
+            let created = paths
+                .directory
+                .write_private_noclobber(IDENTITY_FILE, &secret_bytes)?;
             if created {
                 let secret = StaticSecret::from(secret_bytes);
                 secret_bytes.zeroize();
@@ -127,13 +125,7 @@ pub struct TrustStore {
 
 impl TrustStore {
     pub fn load(paths: &Paths) -> Result<Self> {
-        let path = paths.peers();
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let contents = fs::read(&path)?;
-        serde_json::from_slice(&contents)
-            .map_err(|error| XferError::Configuration(format!("invalid peer store: {error}")))
+        Ok(paths.peer_store().load()?)
     }
 
     pub fn get(&self, endpoint: &str) -> Option<&KnownPeer> {
@@ -170,63 +162,30 @@ impl TrustStore {
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        let _lock = lock_peer_store(paths)?;
-        self.save_unlocked(paths)
-    }
-
-    pub fn update<T>(paths: &Paths, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let _lock = lock_peer_store(paths)?;
-        let mut store = Self::load(paths)?;
-        let result = operation(&mut store)?;
-        store.save_unlocked(paths)?;
-        Ok(result)
-    }
-
-    fn save_unlocked(&self, paths: &Paths) -> Result<()> {
-        paths.ensure()?;
-        let encoded = serde_json::to_vec_pretty(self).map_err(|error| {
-            XferError::Configuration(format!("could not encode peer store: {error}"))
-        })?;
-        let destination = paths.peers();
-        let mut temporary = tempfile::NamedTempFile::new_in(paths.root())?;
-        temporary.write_all(&encoded)?;
-        temporary.flush()?;
-        temporary.as_file().sync_all()?;
-        set_private_file_permissions(temporary.path())?;
-        temporary
-            .persist(&destination)
-            .map_err(|error| XferError::Io(error.error))?;
+        paths.peer_store().save(self)?;
         Ok(())
     }
-}
 
-fn lock_peer_store(paths: &Paths) -> Result<fs::File> {
-    paths.ensure()?;
-    let path = paths.peers_lock();
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)?;
-    set_private_file_permissions(&path)?;
-    FileExt::lock_exclusive(&lock)?;
-    Ok(lock)
-}
-
-fn write_private_file_noclobber(path: &Path, bytes: &[u8]) -> Result<bool> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| XferError::Configuration("identity path has no parent".into()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(bytes)?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    set_private_file_permissions(temporary.path())?;
-    match temporary.persist_noclobber(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(XferError::Io(error.error)),
+    /// Locks the store, applies `operation`, and saves the result. A failing
+    /// `operation` leaves the stored peers untouched.
+    pub fn update<T>(paths: &Paths, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        // The shared store speaks its own error type, which cannot represent
+        // every `XferError`. The real error is carried out of the closure here
+        // and the returned one is only a signal to abandon the save.
+        let mut failure = None;
+        let outcome = paths.peer_store().update(|store| match operation(store) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                failure = Some(error);
+                Err(rust_cli_release::Error::Configuration(
+                    "peer store was left unchanged".into(),
+                ))
+            }
+        });
+        match outcome {
+            Ok(value) => Ok(value),
+            Err(error) => Err(failure.unwrap_or_else(|| error.into())),
+        }
     }
 }
 
@@ -236,33 +195,10 @@ fn unix_timestamp() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-#[cfg(unix)]
-fn set_private_dir_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         sync::{Arc, Barrier},
         thread,
     };
