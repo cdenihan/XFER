@@ -34,13 +34,13 @@ pub enum XferError {
 /// Maps the shared release crate's errors variant by variant rather than
 /// through `to_string`, so a failure surfaces with the same wording it had
 /// when this crate owned the code.
-impl From<rust_cli_release::Error> for XferError {
-    fn from(error: rust_cli_release::Error) -> Self {
+impl From<rust_cli_toolkit::Error> for XferError {
+    fn from(error: rust_cli_toolkit::Error) -> Self {
         match error {
-            rust_cli_release::Error::Io(error) => Self::Io(error),
-            rust_cli_release::Error::Configuration(message) => Self::Configuration(message),
-            rust_cli_release::Error::InvalidInput(message) => Self::InvalidInput(message),
-            rust_cli_release::Error::Security(message) => Self::Security(message),
+            rust_cli_toolkit::Error::Io(error) => Self::Io(error),
+            rust_cli_toolkit::Error::Configuration(message) => Self::Configuration(message),
+            rust_cli_toolkit::Error::InvalidInput(message) => Self::InvalidInput(message),
+            rust_cli_toolkit::Error::Security(message) => Self::Security(message),
         }
     }
 }

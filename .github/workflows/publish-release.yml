@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   publish:
-    uses: cdenihan/rust-cli-release/.github/workflows/publish-release.yml@v1.6.0
+    uses: cdenihan/rust-cli-toolkit/.github/workflows/publish-release.yml@v2.0.0
     with:
       version: ${{ inputs.version }}
       tag: ${{ inputs.tag }}
@@ -35,4 +35,4 @@ jobs:
       cargo-package: xfer
       environment-prefix: XFER
     secrets:
-      dependency_token: ${{ secrets.RUST_CLI_RELEASE_TOKEN }}
+      dependency_token: ${{ secrets.RUST_CLI_TOOLKIT_TOKEN }}
