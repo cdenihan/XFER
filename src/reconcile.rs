@@ -5,7 +5,10 @@ use crate::{
     control::TransferControl,
     delta::SyncStats,
     error::{Result, XferError},
-    filesystem::{TransferPlan, build_plan, open_planned_file, path_to_wire, safe_relative_path},
+    filesystem::{
+        TransferPlan, build_plan_with_gitignore, open_planned_file, path_to_wire,
+        safe_relative_path,
+    },
     protocol::{EntryKind, FrameKind, Offer, RecordStream, TransferKind},
     receiver::{PathRegistry, validate_offer},
     reporter::Reporter,
@@ -32,12 +35,16 @@ struct Item {
 }
 #[derive(Serialize, Deserialize)]
 struct InventoryHeader {
+    #[serde(default)]
+    gitignore: bool,
     count: usize,
     root: String,
 }
 #[derive(Serialize, Deserialize)]
 struct Request {
     excludes: Vec<String>,
+    #[serde(default)]
+    gitignore: bool,
 }
 #[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Baseline {
@@ -184,9 +191,15 @@ pub(crate) fn send(
         FrameKind::FilePlan,
         &Request {
             excludes: options.excludes.clone(),
+            gitignore: options.gitignore,
         },
     )?;
     let header: InventoryHeader = session.receive_message(FrameKind::Basis)?;
+    if options.gitignore && !header.gitignore {
+        return Err(XferError::Rejected(
+            "update the receiver to use --gitignore with two-way sync".into(),
+        ));
+    }
     if header.count > MAX_INVENTORY || header.root.len() > 4096 {
         return Err(XferError::protocol("invalid two-way inventory"));
     }
@@ -204,6 +217,13 @@ pub(crate) fn send(
             registry.insert(&safe_relative_path(&item.path)?, item.kind)?;
         }
         remote.extend(page);
+    }
+    if options.gitignore {
+        let ignored = crate::filesystem::git_ignored_paths(
+            &options.input,
+            remote.iter().map(|item| item.path.as_str()),
+        )?;
+        remote.retain(|item| !ignored.contains(&item.path));
     }
     let source = fs::canonicalize(&options.input)?;
     let key = format!(
@@ -363,7 +383,7 @@ pub(crate) fn receive(
     let root = crate::sync::destination(options, &offer.root_name)?;
     crate::sync::checked_target(&root, Path::new(""))?;
     let mut plan = if root.exists() {
-        build_plan(&root, &request.excludes, false)?
+        build_plan_with_gitignore(&root, &request.excludes, false, request.gitignore)?
     } else {
         TransferPlan {
             root_name: offer.root_name.clone(),
@@ -387,6 +407,7 @@ pub(crate) fn receive(
     session.send_message(
         FrameKind::Basis,
         &InventoryHeader {
+            gitignore: request.gitignore,
             count: remote.len(),
             root: root_identity.display().to_string(),
         },
@@ -449,6 +470,7 @@ pub(crate) fn receive(
         host: String::new(),
         port: 0,
         excludes: Vec::new(),
+        gitignore: false,
         follow_links: false,
         secure: options.secure,
         token: None,

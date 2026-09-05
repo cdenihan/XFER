@@ -64,6 +64,7 @@ fn insecure_file_transfer_round_trips() {
             port,
             input: source,
             excludes: Vec::new(),
+            gitignore: false,
             follow_links: false,
             secure: false,
             token: None,
@@ -120,6 +121,7 @@ fn secure_file_transfer_round_trips() {
             port,
             input: source,
             excludes: Vec::new(),
+            gitignore: false,
             follow_links: false,
             secure: true,
             token: Some("shared secret".into()),
@@ -174,6 +176,7 @@ fn directory_transfer_preserves_tree_and_empty_directories() {
             port,
             input: source,
             excludes: Vec::new(),
+            gitignore: false,
             follow_links: false,
             secure: false,
             token: None,
@@ -314,6 +317,7 @@ fn zero_byte_file_transfer_round_trips() {
             port,
             input: source,
             excludes: Vec::new(),
+            gitignore: false,
             follow_links: false,
             secure: false,
             token: None,
@@ -372,6 +376,7 @@ fn receive_collision_uses_numbered_destination() {
             port,
             input: source,
             excludes: Vec::new(),
+            gitignore: false,
             follow_links: false,
             secure: false,
             token: None,
@@ -771,6 +776,7 @@ fn interrupted_and_corrupt_transfers_preserve_destination_and_remove_staging() {
 }
 
 struct SyncPair {
+    gitignore: bool,
     direct_output: Option<PathBuf>,
     listener: TcpListener,
     source: tempfile::TempDir,
@@ -781,6 +787,7 @@ struct SyncPair {
 impl SyncPair {
     fn new() -> Self {
         Self {
+            gitignore: false,
             direct_output: None,
             listener: TcpListener::bind("127.0.0.1:0").unwrap(),
             source: tempdir().unwrap(),
@@ -834,6 +841,7 @@ impl SyncPair {
                 port: self.listener.local_addr().unwrap().port(),
                 input: self.local(),
                 excludes: vec!["ignored".into()],
+                gitignore: self.gitignore,
                 follow_links: false,
                 secure: true,
                 token: Some("sync secret".into()),
@@ -1095,5 +1103,66 @@ fn direct_sync_preview_leaves_missing_destination_absent() {
         pair.run(two_way, false).unwrap();
         assert_eq!(fs::read(pair.remote().join("file")).unwrap(), b"new");
         assert!(!pair.remote().join("data").exists());
+    }
+}
+
+#[test]
+fn gitignore_sync_filters_preview_and_apply_in_both_directions() {
+    for two_way in [false, true] {
+        let mut pair = SyncPair::new();
+        pair.gitignore = true;
+        for root in [pair.local(), pair.remote()] {
+            fs::create_dir_all(&root).unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["init", "--quiet"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            fs::write(root.join(".gitignore"), "*.class\n").unwrap();
+        }
+        fs::write(pair.local().join("AccountManager.java"), b"new code").unwrap();
+        fs::write(pair.remote().join("AccountManager.java"), b"new code").unwrap();
+        fs::write(pair.local().join("AccountManager.class"), b"local compiled").unwrap();
+        fs::write(
+            pair.remote().join("AccountManager.class"),
+            b"remote compiled",
+        )
+        .unwrap();
+        fs::write(pair.remote().join("remote.java"), b"remote source").unwrap();
+        fs::write(pair.local().join("local.java"), b"local source").unwrap();
+        // A reverse candidate must obey the initiating repository's rules,
+        // even when that path does not exist there yet.
+        fs::write(pair.local().join(".git/info/exclude"), "local-ignore\n").unwrap();
+        fs::write(pair.remote().join("local-ignore"), b"leave remote").unwrap();
+        let preview = pair.run(two_way, true).unwrap();
+        assert_eq!(
+            preview.sync_stats.unwrap().changed_files,
+            if two_way { 2 } else { 1 }
+        );
+        assert!(!pair.remote().join("local.java").exists());
+        assert!(!pair.local().join("remote.java").exists());
+        pair.run(two_way, false).unwrap();
+        assert_eq!(
+            fs::read(pair.remote().join("local.java")).unwrap(),
+            b"local source"
+        );
+        assert_eq!(pair.local().join("remote.java").exists(), two_way);
+        assert!(!pair.local().join("local-ignore").exists());
+        assert_eq!(
+            fs::read(pair.local().join("AccountManager.class")).unwrap(),
+            b"local compiled"
+        );
+        assert_eq!(
+            fs::read(pair.remote().join("AccountManager.class")).unwrap(),
+            b"remote compiled"
+        );
+        assert_eq!(
+            fs::read(pair.local().join(".git/info/exclude")).unwrap(),
+            b"local-ignore\n"
+        );
     }
 }

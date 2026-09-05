@@ -49,7 +49,123 @@ pub struct TransferPlan {
     pub skipped_count: u64,
 }
 
+fn git_command(root: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
+        .arg(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    command
+}
+
+/// Check remote candidates against the initiating checkout too, so a reverse
+/// sync cannot bring back files that are ignored locally but absent on disk.
+pub(crate) fn git_ignored_paths<'a>(
+    root: &Path,
+    paths: impl Iterator<Item = &'a str>,
+) -> Result<HashSet<String>> {
+    use std::io::{Seek, SeekFrom, Write};
+    let root = fs::canonicalize(root)?;
+    if !root.ancestors().any(|parent| parent.join(".git").exists()) {
+        return Ok(HashSet::new());
+    }
+    let mut input = tempfile::tempfile()?;
+    let mut ignored = HashSet::new();
+    for path in paths {
+        if Path::new(path)
+            .components()
+            .any(|part| part.as_os_str() == ".git")
+        {
+            ignored.insert(path.to_string());
+        } else {
+            input.write_all(path.as_bytes())?;
+            input.write_all(&[0])?;
+        }
+    }
+    input.seek(SeekFrom::Start(0))?;
+    let output = git_command(&root)
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(input)
+        .output()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return Err(XferError::invalid_input(
+            "Git could not check incoming sync paths",
+        ));
+    }
+    for bytes in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+    {
+        ignored.insert(
+            std::str::from_utf8(bytes)
+                .map_err(|_| XferError::invalid_input("Git path is not valid UTF-8"))?
+                .to_string(),
+        );
+    }
+    Ok(ignored)
+}
+
+/// Git supplies its own ignore semantics (nested rules, negations, repository
+/// excludes, and tracked-file exceptions). Include parent directories so the
+/// existing walker can prune everything else before validation or hashing.
+fn git_sync_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>> {
+    if !root.ancestors().any(|parent| parent.join(".git").exists()) {
+        return Ok(None);
+    }
+    let output = git_command(root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ])
+        .output()
+        .map_err(|error| {
+            XferError::invalid_input(format!(
+                "cannot read Git ignore rules; Git must be installed: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(XferError::invalid_input(
+            "Git could not list files for --gitignore; check repository access",
+        ));
+    }
+    let mut paths = HashSet::new();
+    for bytes in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+    {
+        let name = std::str::from_utf8(bytes)
+            .map_err(|_| XferError::invalid_input("Git path is not valid UTF-8"))?;
+        let path = Path::new(name);
+        if path.components().any(|part| part.as_os_str() == ".git") {
+            continue;
+        }
+        for parent in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+            paths.insert(parent.to_path_buf());
+        }
+    }
+    Ok(Some(paths))
+}
+
 pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Result<TransferPlan> {
+    build_plan_with_gitignore(input, excludes, follow_links, false)
+}
+
+/// Plan tracked and unignored untracked files when Git filtering is enabled.
+pub fn build_plan_with_gitignore(
+    input: &Path,
+    excludes: &[String],
+    follow_links: bool,
+    gitignore: bool,
+) -> Result<TransferPlan> {
     let metadata = fs::symlink_metadata(input).map_err(|error| {
         XferError::invalid_input(format!("cannot inspect {}: {error}", input.display()))
     })?;
@@ -99,6 +215,11 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
     }
 
     let canonical_root = fs::canonicalize(input)?;
+    let git_paths = if gitignore {
+        git_sync_paths(&canonical_root)?
+    } else {
+        None
+    };
     let mut entries = Vec::new();
     let mut total_bytes = 0_u64;
     let mut file_count = 0_u64;
@@ -117,7 +238,11 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
             let Ok(relative) = entry.path().strip_prefix(input) else {
                 return true;
             };
-            if matcher.is_match(relative) {
+            if matcher.is_match(relative)
+                || git_paths
+                    .as_ref()
+                    .is_some_and(|paths| !paths.contains(relative))
+            {
                 excluded_count.set(excluded_count.get() + 1);
                 false
             } else {
@@ -643,6 +768,140 @@ mod tests {
         assert_eq!(
             choose_destination(directory.path(), "file", false).unwrap(),
             directory.path().join("file (2)")
+        );
+    }
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = git_command(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn gitignore_honors_nested_rules_negations_tracked_files_and_manual_excludes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "--quiet"]);
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::create_dir(root.join("build")).unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "*.log\n!keep.log\n/root-only\nbuild/\n",
+        )
+        .unwrap();
+        fs::write(root.join("nested/.gitignore"), "*.tmp\n!keep.tmp\n").unwrap();
+        fs::write(root.join(".git/info/exclude"), "private.txt\n").unwrap();
+        for name in [
+            "skip.log",
+            "keep.log",
+            "tracked.log",
+            "root-only",
+            "nested/root-only",
+            "nested/skip.tmp",
+            "nested/keep.tmp",
+            "nested/skip.log",
+            "build/output",
+            "private.txt",
+            "AccountManager.java",
+        ] {
+            fs::write(root.join(name), b"data").unwrap();
+        }
+        git(root, &["add", "--force", "tracked.log"]);
+        let plan = build_plan_with_gitignore(root, &[], false, true).unwrap();
+        let names = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+            .map(|entry| path_to_wire(&entry.relative).unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            names,
+            [
+                ".gitignore",
+                "nested/.gitignore",
+                "keep.log",
+                "tracked.log",
+                "nested/root-only",
+                "nested/keep.tmp",
+                "AccountManager.java"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        );
+        assert!(
+            !plan
+                .entries
+                .iter()
+                .any(|entry| entry.relative.starts_with(".git")
+                    || entry.relative.starts_with("build"))
+        );
+        let subdir = build_plan_with_gitignore(&root.join("nested"), &[], false, true).unwrap();
+        assert!(
+            !subdir
+                .entries
+                .iter()
+                .any(|entry| entry.relative == Path::new("skip.log"))
+        );
+        assert!(
+            subdir
+                .entries
+                .iter()
+                .any(|entry| entry.relative == Path::new("keep.tmp"))
+        );
+        let excluded =
+            build_plan_with_gitignore(root, &["tracked.log".into()], false, true).unwrap();
+        assert!(
+            !excluded
+                .entries
+                .iter()
+                .any(|entry| entry.relative == Path::new("tracked.log"))
+        );
+        let unfiltered = build_plan(root, &[], false).unwrap();
+        assert!(
+            unfiltered
+                .entries
+                .iter()
+                .any(|entry| entry.relative == Path::new("skip.log"))
+        );
+    }
+
+    #[test]
+    fn gitignore_is_inert_outside_a_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join(".gitignore"), "*.log").unwrap();
+        fs::write(directory.path().join("keep.log"), b"data").unwrap();
+        let plan = build_plan_with_gitignore(directory.path(), &[], false, true).unwrap();
+        assert_eq!(plan.file_count, 2);
+    }
+
+    #[test]
+    fn gitignore_supports_git_file_markers_and_paths_with_spaces() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("checkout");
+        fs::create_dir(&root).unwrap();
+        git(
+            &root,
+            &["init", "--quiet", "--separate-git-dir", "../metadata"],
+        );
+        assert!(root.join(".git").is_file());
+        fs::write(root.join(".gitignore"), "*.class\n").unwrap();
+        fs::write(root.join("Account Manager.java"), b"source").unwrap();
+        fs::write(root.join("Account Manager.class"), b"compiled").unwrap();
+        let plan = build_plan_with_gitignore(&root, &[], false, true).unwrap();
+        assert_eq!(plan.file_count, 2);
+        assert!(
+            plan.entries
+                .iter()
+                .any(|entry| entry.relative == Path::new("Account Manager.java"))
         );
     }
 }

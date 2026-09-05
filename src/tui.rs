@@ -119,6 +119,8 @@ impl Action {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Recent {
+    #[serde(default)]
+    gitignore: bool,
     action: Action,
     path: PathBuf,
     host: String,
@@ -281,6 +283,7 @@ struct App {
     token: String,
     bind: String,
     excludes: Vec<String>,
+    gitignore: bool,
     allow_sync: bool,
     conflict_policy: crate::transfer::ConflictPolicy,
     config_dir: Option<PathBuf>,
@@ -325,6 +328,7 @@ impl App {
             token: std::env::var("XFER_TOKEN").unwrap_or_default(),
             bind: "::".into(),
             excludes: Vec::new(),
+            gitignore: false,
             allow_sync: false,
             conflict_policy: crate::transfer::ConflictPolicy::Preserve,
             config_dir,
@@ -426,6 +430,7 @@ impl App {
                             self.error = None;
                             if !preview {
                                 let recent = Recent {
+                                    gitignore: self.gitignore,
                                     action: self.action,
                                     path: self.path.clone(),
                                     host: self.host.clone(),
@@ -586,6 +591,7 @@ impl App {
                     if self.selection == 4 {
                         if let Some(recent) = &self.recent {
                             self.action = recent.action;
+                            self.gitignore = recent.gitignore;
                             self.path = recent.path.clone();
                             self.host = recent.host.clone();
                             self.port = recent.port;
@@ -669,6 +675,7 @@ impl App {
                 KeyCode::Char('p') => self.edit(Edit::Port),
                 KeyCode::Char('t') => self.edit(Edit::Token),
                 KeyCode::Char('e') if self.action != Action::Receive => self.edit(Edit::Excludes),
+                KeyCode::Char('g') if self.action.syncing() => self.gitignore = !self.gitignore,
                 KeyCode::Char('s') if self.action == Action::Receive => {
                     self.allow_sync = !self.allow_sync;
                 }
@@ -740,6 +747,7 @@ impl App {
             port: self.port,
             input: self.path.clone(),
             excludes: self.excludes.clone(),
+            gitignore: self.gitignore && action.syncing(),
             follow_links: false,
             secure: true,
             token: (!self.token.is_empty()).then(|| self.token.clone()),
@@ -840,6 +848,9 @@ impl App {
             Screen::Computer => "↑↓ Choose   Enter Select   m Manual address   Esc Back",
             Screen::Review if self.action == Action::Receive => {
                 "Enter Start   s Sync access   p Port   t Token   b Bind   Esc Back"
+            }
+            Screen::Review if self.action.syncing() => {
+                "Enter Compare   g Git ignore   e Exclusions   p Port   Esc Back"
             }
             Screen::Review => "Enter Continue   e Exclusions   p Port   t Token   Esc Back",
             Screen::Running => "Esc Stop   d Details",
@@ -1085,6 +1096,15 @@ impl App {
                 }),
                 Line::from(if self.action.syncing() {
                     "Destination-only files stay. No deletions are propagated."
+                } else {
+                    ""
+                }),
+                Line::from(if self.action.syncing() {
+                    if self.gitignore {
+                        "Git ignore: ON — tracked and unignored files; skips .git"
+                    } else {
+                        "Git ignore: OFF — press g to follow repository rules"
+                    }
                 } else {
                     ""
                 }),
@@ -1490,6 +1510,34 @@ mod tests {
         app.key(key(KeyCode::Esc));
         assert_eq!(app.screen, Screen::Folder);
     }
+    #[test]
+    fn gitignore_toggle_is_restored_when_repeating_a_sync() {
+        let config = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(config.path().into()));
+        app.action = Action::Sync;
+        app.screen = Screen::Review;
+        app.key(key(KeyCode::Char('g')));
+        assert!(app.gitignore);
+        let recent = Recent {
+            gitignore: app.gitignore,
+            action: app.action,
+            path: app.path.clone(),
+            host: "peer".into(),
+            port: DEFAULT_PORT,
+        };
+        preferences(Some(config.path().into()))
+            .unwrap()
+            .save(&recent)
+            .unwrap();
+        let mut restarted = App::new(Some(config.path().into()));
+        restarted.selection = 4;
+        restarted.key(key(KeyCode::Enter));
+        assert!(restarted.gitignore);
+        assert_eq!(restarted.screen, Screen::Review);
+        restarted.key(key(KeyCode::Char('g')));
+        assert!(!restarted.gitignore);
+    }
+
     #[test]
     fn cancellation_rejects_pending_trust() {
         let config = tempfile::tempdir().unwrap();

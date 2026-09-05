@@ -109,7 +109,8 @@ the sender’s folder name). After reviewing the preview, press Enter on the
 sending computer to apply; the receiver keeps waiting until you do. Copies
 still save the incoming item inside the selected folder. During a conflict preview, `l` prefers local files,
 `r` prefers remote files, and `s` preserves both versions; each choice refreshes
-the preview before applying. Esc cancels waiting or active work. Completed and
+the preview before applying. On the sync review screen, `g` toggles Git ignore
+filtering; the choice is remembered when repeating the last workflow. Esc cancels waiting or active work. Completed and
 failed operations can be retried, and the last workflow is remembered without
 saving its shared token. Cancellation during source planning or name resolution
 waits for that operation to return.
@@ -204,6 +205,27 @@ xfer receive --sync --sync-into --output ~/Developer/PlatinumBankingSystem
 This updates files directly in `PlatinumBankingSystem`, even if the sending
 folder has a different name. Without `--sync-into`, the CLI keeps the parent
 folder behavior shown above.
+
+Use `--gitignore` to sync tracked files plus untracked files that Git does not
+ignore:
+
+```console
+xfer sync 192.168.1.42 ./PlatinumBankingSystem --gitignore --dry-run
+xfer sync 192.168.1.42 ./PlatinumBankingSystem --gitignore
+```
+
+This opt-in setting follows nested `.gitignore` rules, negations, and Git's
+repository/global excludes. Tracked files remain included even if an ignore
+pattern matches them; explicit `--exclude` patterns still take precedence.
+Git metadata (`.git`) and empty directories are omitted in a repository.
+Git must be installed. Outside a repository, the setting has no effect.
+Subdirectories of repositories and worktrees are supported.
+
+For `--two-way --gitignore`, each side filters its outgoing files using its own
+repository rules. Incoming candidates are also checked against the initiating
+repository's rules, so locally ignored files are not brought back. Both XFER
+builds must support this option for two-way sync. Ignored files already at the
+destination remain untouched; this option never deletes them.
 
 Two-way sync remembers the last successful common file hashes on the initiating
 machine. Changes made on just one side flow to the other. If both sides changed,

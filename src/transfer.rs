@@ -15,7 +15,7 @@ use crate::{
     crypto::{derive_session_keys, display_fingerprint, fingerprint, sas, update_manifest},
     discovery::Advertiser,
     error::{Result, XferError},
-    filesystem::{TransferPlan, build_plan, open_planned_file, path_to_wire},
+    filesystem::{TransferPlan, build_plan_with_gitignore, open_planned_file, path_to_wire},
     net,
     protocol::{
         CHUNK_SIZE, ClientHello, Complete, Decision, EntryEnd, EntryKind, EntryStart, FrameKind,
@@ -48,6 +48,7 @@ pub struct SendOptions {
     pub port: u16,
     pub input: PathBuf,
     pub excludes: Vec<String>,
+    pub gitignore: bool,
     pub follow_links: bool,
     pub secure: bool,
     pub token: Option<String>,
@@ -102,7 +103,12 @@ fn send_inner(
 ) -> Result<TransferSummary> {
     control.check()?;
     validate_secure_token(options.secure, options.token.as_deref())?;
-    let plan = build_plan(&options.input, &options.excludes, options.follow_links)?;
+    let plan = build_plan_with_gitignore(
+        &options.input,
+        &options.excludes,
+        options.follow_links,
+        options.gitignore,
+    )?;
     if (options.sync || options.two_way) && plan.kind != crate::protocol::TransferKind::Directory {
         return Err(XferError::invalid_input("sync requires a directory"));
     }

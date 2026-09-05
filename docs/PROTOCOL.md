@@ -177,3 +177,10 @@ Ancestor directory names must also have consistent spelling: `Foo/a` and
 
 v5 intentionally does not implement the earlier Python tar stream or the prior
 Rust multi-port protocol. Version mismatches fail during negotiation.
+
+The two-way request optionally includes `gitignore` (default false). The
+receiver echoes this flag in its inventory header after planning with its
+local repository's Git ignore rules. A sender requesting this option rejects
+an inventory without the acknowledgment before applying changes. Older peers
+remain compatible when the option is disabled; one-way Git filtering happens
+entirely during sender planning and needs no wire extension.

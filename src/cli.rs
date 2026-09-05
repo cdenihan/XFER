@@ -107,6 +107,10 @@ enum Command {
         #[arg(long)]
         exclude: Vec<String>,
 
+        /// Respect Git ignore rules; include tracked files and skip .git metadata.
+        #[arg(long)]
+        gitignore: bool,
+
         /// Follow symlinks that remain inside the transfer root.
         #[arg(long)]
         follow_links: bool,
@@ -291,6 +295,7 @@ pub fn run() -> anyhow::Result<()> {
                     port,
                     input: path,
                     excludes: exclude,
+                    gitignore: false,
                     follow_links,
                     secure: !insecure,
                     token,
@@ -309,6 +314,7 @@ pub fn run() -> anyhow::Result<()> {
             path,
             port,
             exclude,
+            gitignore,
             follow_links,
             insecure,
             accept_new,
@@ -325,6 +331,7 @@ pub fn run() -> anyhow::Result<()> {
                     port,
                     input: path,
                     excludes: exclude,
+                    gitignore,
                     follow_links,
                     secure: !insecure,
                     token,
@@ -689,6 +696,30 @@ mod tests {
     use clap::CommandFactory;
 
     use super::Cli;
+
+    #[test]
+    fn sync_accepts_gitignore_with_preview_and_two_way() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "xfer",
+            "sync",
+            "peer",
+            ".",
+            "--gitignore",
+            "--two-way",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Sync {
+                gitignore: true,
+                two_way: true,
+                dry_run: true,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn clap_configuration_is_valid() {
