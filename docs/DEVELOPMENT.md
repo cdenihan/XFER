@@ -7,6 +7,7 @@ XFER is one package with a library and a thin binary:
 | Module | Responsibility |
 | --- | --- |
 | `cli` | clap command model and command dispatch |
+| `control` | cooperative cancellation and shutdown of blocked transfer sockets |
 | `config` | identity, permissions, and TOFU peer persistence |
 | `crypto` | key derivation, fingerprints, SAS, and AEAD helpers |
 | `discovery` | TTL-1 multicast receiver announcements and passive browsing |
@@ -14,8 +15,20 @@ XFER is one package with a library and a thin binary:
 | `net` | dual-stack listeners, address discovery, and connection setup |
 | `protocol` | negotiation, typed messages, and framed record transport |
 | `reporter` | presentation-neutral status, progress, and trust prompts |
-| `transfer` | sender/receiver orchestration and verification |
-| `tui` | Ratatui forms, worker events, progress, and peer confirmation |
+| `transfer` | connection, trust handshake, sending, and receive orchestration |
+| `receiver` | frame state machine, path registry, totals, and verification |
+| `storage` | private staging, collision naming, publication, and overwrite rollback |
+| `delta` | Bounded rolling block matching and transfer statistics |
+| `sync` | Incremental file reconstruction, previews, and per-file publication |
+| `reconcile` | Two-way inventories, baseline history, and conflict decisions |
+| `tui` | Guided action, folder, computer, review, preview, and result screens |
+
+The receive state machine has four states: between entries, receiving a file,
+verified, and failed. An invalid frame poisons it; only a verified machine can
+produce the value that publishes the storage transaction. Staging owns incoming
+files until publication, and drop order closes active files before deleting
+staging, including on Windows. Tests can drive the state machine directly
+without a socket. Network integration tests live in `src/transfer/tests.rs`.
 
 The CLI and TUI call the same `transfer` APIs. Network and filesystem behavior
 must not be reimplemented in a presentation layer.
@@ -50,7 +63,8 @@ Unit tests cover:
 - protocol record bounds, flags, sequence ordering, and negotiation rejection;
 - discovery validation, version filtering, address selection, and name limits;
 - exclusions, path traversal, portability, symlink escape, and collision naming;
-- TUI form defaults, endpoint formatting, and constrained layouts;
+- TUI navigation, consecutive Send/Receive list items, input editing, and constrained layouts;
+- rolling block reuse after insertions/deletions and literal boundaries;
 - clap command validity and value bounds.
 
 End-to-end tests bind an ephemeral loopback port and cover:
@@ -60,8 +74,11 @@ End-to-end tests bind an ephemeral loopback port and cover:
 - zero-byte files and collision-safe destinations;
 - directory trees and empty directories;
 - wrong-token failure before TOFU persistence;
-- changed pinned-identity rejection;
-- a complete transfer between two compiled CLI processes.
+- changed pinned-identity rejection and manual approval with concurrent store updates;
+- cancellation of waiting listeners and blocked reads;
+- malformed totals, path aliases, corrupt data, and interrupted staging cleanup;
+- a complete transfer between two compiled CLI processes;
+- unchanged sync, shifted block reuse, read-only previews, and two-way conflicts.
 
 CLI integration tests verify human and JSON output, diagnostics, peer
 management, completion generation, validation failures, and a real subprocess

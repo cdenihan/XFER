@@ -5,7 +5,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::error::{Result, XferError};
 
-const SESSION_CONTEXT: &[u8] = b"xfer-v4-session";
+const SESSION_CONTEXT: &[u8] = b"xfer-v5-session";
 const SESSION_MATERIAL_LEN: usize = 72;
 
 #[derive(Clone)]
@@ -82,7 +82,7 @@ pub fn derive_session_keys(
         return Err(XferError::security("peer supplied an invalid public key"));
     }
     let mut salt_hasher = Sha256::new();
-    salt_hasher.update(b"xfer-v4-salt");
+    salt_hasher.update(b"xfer-v5-salt");
     salt_hasher.update(server_public);
     salt_hasher.update(client_public);
     salt_hasher.update(server_nonce);
@@ -140,7 +140,7 @@ pub fn sas(
     token: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"xfer-v4-sas");
+    hasher.update(b"xfer-v5-sas");
     hasher.update(server_public);
     hasher.update(client_public);
     hasher.update(server_nonce);
@@ -154,6 +154,12 @@ pub fn sas(
     ]) % 10_000_000_000;
     let digits = format!("{value:010}");
     format!("{}-{}-{}", &digits[..3], &digits[3..6], &digits[6..])
+}
+
+pub(crate) fn update_manifest(manifest: &mut Sha256, path: &str, digest: &[u8; 32]) {
+    manifest.update((path.len() as u64).to_be_bytes());
+    manifest.update(path.as_bytes());
+    manifest.update(digest);
 }
 
 #[cfg(test)]

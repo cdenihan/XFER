@@ -1,12 +1,18 @@
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod crypto;
+pub mod delta;
 pub mod discovery;
 pub mod error;
 pub mod filesystem;
 pub mod net;
 pub mod protocol;
+mod receiver;
+mod reconcile;
 pub mod reporter;
+mod storage;
+mod sync;
 pub mod transfer;
 pub mod tui;
 pub mod update;

@@ -7,14 +7,14 @@ use crate::{
     error::{Result, XferError},
 };
 
-pub const VERSION: u16 = 4;
-const VERSION_BYTE: u8 = 4;
+pub const VERSION: u16 = 5;
+const VERSION_BYTE: u8 = 5;
 pub const DEFAULT_PORT: u16 = 9_000;
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 pub const MAX_RECORD_SIZE: usize = CHUNK_SIZE + 64 * 1024;
 
-const NEGOTIATION_MAGIC: &[u8; 4] = b"XFR4";
-const RECORD_MAGIC: &[u8; 4] = b"XR4R";
+const NEGOTIATION_MAGIC: &[u8; 4] = b"XFR5";
+const RECORD_MAGIC: &[u8; 4] = b"XR5R";
 const HEADER_LEN: usize = 20;
 const FLAG_SECURE: u8 = 1;
 const RECORD_FLAG_ENCRYPTED: u16 = 1;
@@ -31,6 +31,13 @@ pub enum FrameKind {
     Complete = 7,
     Error = 8,
     Ready = 9,
+    SyncOffer = 10,
+    Basis = 11,
+    Reuse = 12,
+    PreviewOffer = 13,
+    FilePlan = 14,
+    TwoWayOffer = 15,
+    TwoWayPreview = 16,
 }
 
 impl TryFrom<u8> for FrameKind {
@@ -47,6 +54,13 @@ impl TryFrom<u8> for FrameKind {
             7 => Ok(Self::Complete),
             8 => Ok(Self::Error),
             9 => Ok(Self::Ready),
+            10 => Ok(Self::SyncOffer),
+            11 => Ok(Self::Basis),
+            12 => Ok(Self::Reuse),
+            13 => Ok(Self::PreviewOffer),
+            14 => Ok(Self::FilePlan),
+            15 => Ok(Self::TwoWayOffer),
+            16 => Ok(Self::TwoWayPreview),
             other => Err(XferError::protocol(format!("unknown frame type {other}"))),
         }
     }
@@ -102,6 +116,10 @@ pub struct TransferEnd {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Complete {
+    #[serde(default)]
+    pub sync_stats: Option<crate::delta::SyncStats>,
+    #[serde(default)]
+    pub preview: bool,
     pub destination: String,
     pub file_count: u64,
     pub total_bytes: u64,
@@ -390,7 +408,7 @@ pub fn read_client_hello<S: Read>(stream: &mut S) -> Result<ClientHello> {
 
 fn validate_negotiation_header(header: [u8; 8]) -> Result<()> {
     if &header[..4] != NEGOTIATION_MAGIC {
-        return Err(XferError::protocol("peer is not speaking XFER v4"));
+        return Err(XferError::protocol("peer is not speaking XFER v5"));
     }
     let version = u16::from_be_bytes([header[4], header[5]]);
     if version != VERSION {

@@ -84,3 +84,13 @@ Symlinks are not created by the receiver. Sender symlinks are skipped unless
 `--insecure` disables confidentiality, record authentication, SAS, and identity
 pinning. SHA-256 still catches accidental corruption, but it is not meaningful
 against an active attacker who can replace both content and hashes.
+
+## Sync access
+
+`receive --sync` explicitly permits incremental overwrites and two-way reads
+within the selected child folder of the output directory. Receiver identity
+pinning authenticates the receiver, not the connecting client. Use a shared
+token to restrict who can use a reachable sync receiver. Sync rejects symlink
+targets, verifies reused blocks and reconstructed files, and stages each changed
+file beside its destination before publication. Earlier completed files remain
+if a later file fails. Preview does not write synced data or comparison history.

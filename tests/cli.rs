@@ -18,6 +18,7 @@ fn help_lists_primary_workflows() {
         .assert()
         .success()
         .stdout(predicate::str::contains("send"))
+        .stdout(predicate::str::contains("sync"))
         .stdout(predicate::str::contains("receive"))
         .stdout(predicate::str::contains("discover"))
         .stdout(predicate::str::contains("update"))
@@ -439,4 +440,66 @@ fn wait_for_log(path: &std::path::Path, needle: &str) {
         path.display(),
         fs::read_to_string(path).unwrap_or_default()
     );
+}
+
+#[test]
+fn dry_run_can_send_current_and_parent_directories() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("payload");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("hello"), b"hello").unwrap();
+    for (cwd, input) in [(&root, "."), (&root.join("nested"), "..")] {
+        let output = Command::cargo_bin("xfer")
+            .unwrap()
+            .current_dir(cwd)
+            .args(["--json", "send", "example.invalid", input, "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(plan["root_name"], "payload");
+        assert_eq!(plan["total_bytes"], 5);
+    }
+}
+
+#[test]
+fn dry_run_validates_security_options_and_timeout() {
+    for args in [
+        vec!["--insecure", "--token", "secret"],
+        vec!["--token", ""],
+        vec!["--connect-timeout", "0"],
+    ] {
+        Command::cargo_bin("xfer")
+            .unwrap()
+            .args(["send", "example.invalid", ".", "--dry-run"])
+            .args(args)
+            .assert()
+            .failure();
+    }
+}
+
+#[test]
+fn sync_rejects_file_before_connecting_and_exposes_conflict_choices() {
+    let directory = tempdir().unwrap();
+    let file = directory.path().join("file.txt");
+    fs::write(&file, b"data").unwrap();
+    Command::cargo_bin("xfer")
+        .unwrap()
+        .args(["sync", "example.invalid"])
+        .arg(&file)
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sync requires a directory"));
+    Command::cargo_bin("xfer")
+        .unwrap()
+        .args(["sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--two-way"))
+        .stdout(predicate::str::contains("prefer-local"));
 }

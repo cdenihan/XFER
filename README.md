@@ -19,7 +19,8 @@ The CLI is a Rust application with
 - IPv4 and IPv6 support over one configurable port
 - Passive same-LAN receiver discovery with no subnet or port scanning
 - Collision-safe destination naming and explicit `--overwrite`
-- Exclusion globs, safe symlink handling, and a no-network `--dry-run`
+- Exclusion globs, safe symlink handling, and copy/sync previews
+- One-way and two-way incremental folder sync with explicit conflict handling
 - Optional shared token mixed into key derivation
 - Human progress, newline-delimited JSON events, and a live TUI
 - Peer-management, diagnostics, and shell-completion commands
@@ -94,11 +95,21 @@ Launch the Ratatui interface with:
 xfer tui
 ```
 
-The TUI provides send and receive forms, security and overwrite controls, live
-progress, activity logs, and an in-app peer confirmation dialog. Send mode
-automatically lists every active XFER receiver detected on the same LAN; use the
-arrow keys and Enter to select one. Receive mode shows the local IP addresses
-and ports another machine can use.
+Running `xfer` without arguments also opens the interface in a terminal.
+Send and Receive are consecutive items in a vertical list, followed by one-way
+and two-way sync.
+Choose an action, browse to a folder, select a nearby computer (or enter its
+address), and review the operation. Sync always shows a preview before applying.
+
+Use arrows and Enter to navigate, `p` to enter a folder path, and `m` to enter
+an address. Receive mode shows the addresses other computers can use and keeps
+listening after a session. Enable sync access on its review screen to permit
+updates and two-way reads. During a conflict preview, `l` prefers local files,
+`r` prefers remote files, and `s` preserves both versions; each choice refreshes
+the preview before applying. Esc cancels waiting or active work. Completed and
+failed operations can be retried, and the last workflow is remembered without
+saving its shared token. Cancellation during source planning or name resolution
+waits for that operation to return.
 
 ## CLI
 
@@ -118,6 +129,9 @@ xfer send 192.168.1.42 ./payload --port 9100
 xfer send 192.168.1.42 ./project \
   --exclude '.git' \
   --exclude 'target/**'
+
+# Send the current directory
+xfer send 192.168.1.42 .
 
 # Inspect the plan without connecting
 xfer send example.invalid ./project --dry-run
@@ -139,6 +153,70 @@ resolved targets remain inside the transfer root.
 xfer receive --output ./downloads
 ```
 
+The receiver accepts one transfer, verifies it, writes it to the destination,
+and exits. If the destination name already exists, XFER chooses a numbered name
+such as `photo (1).jpg`. Use `--overwrite` to replace the exact destination.
+The receiver is discoverable on the local network by default. Use
+`--no-discovery` when you want to require manual address entry.
+
+To bind a specific interface:
+
+```console
+xfer receive --bind 0.0.0.0 --port 9100
+```
+
+The default bind address is `::`, configured as a dual-stack socket where the
+operating system supports it.
+
+
+### Sync folders between machines
+
+On the other machine, choose the parent directory that will hold synced folders:
+
+```console
+xfer receive --sync --output ~/Sync
+```
+
+Then preview and apply from your machine:
+
+```console
+xfer sync 192.168.1.42 ./photos --two-way --dry-run
+xfer sync 192.168.1.42 ./photos --two-way
+```
+
+This pairs `./photos` with `~/Sync/photos`. Omit `--two-way` to update only the
+remote folder. Unchanged files are left untouched. Changed files reuse matching
+blocks already at the destination, including blocks shifted by insertions;
+only unmatched data travels across the connection. Comparisons read file
+contents rather than relying on modification times. Reported transferred bytes
+exclude encryption, metadata, and block-signature overhead.
+
+Two-way sync remembers the last successful common file hashes on the initiating
+machine. Changes made on just one side flow to the other. If both sides changed,
+or the first sync finds different versions of the same file, both versions stay
+in place and the command reports conflicts with a nonzero exit status. Resolve
+those files yourself or preview an explicit choice:
+
+```console
+xfer sync 192.168.1.42 ./photos --two-way --conflicts prefer-local --dry-run
+xfer sync 192.168.1.42 ./photos --two-way --conflicts prefer-local
+```
+
+`prefer-remote` chooses the other machine's conflicting files. These choices
+apply to all file conflicts; file-versus-directory conflicts remain unresolved.
+Run subsequent syncs from the same machine, using the same endpoint and folders,
+to retain comparison history. Starting from the other machine or losing the
+configuration uses conservative first-sync behavior.
+
+Neither mode propagates deletions: files present on only one side are retained
+(and copied back in two-way mode). Exclusions apply to both sides. Two-way sync
+does not follow symlinks. Preview connects and compares but does not modify the
+synced folders or sync history. Each changed file is verified before publication;
+a canceled sync retains completed files and can be rerun to reuse them. Sync
+receivers keep listening; add `--once` for a single session.
+
+Both machines need this protocol-v5 build; older protocol versions are rejected.
+
 ### Update
 
 ```console
@@ -158,20 +236,6 @@ XFER also exchanges release versions during a transfer. If the versions differ,
 the older interactive CLI warns and offers to update to the peer's exact release.
 Non-interactive and JSON sessions report the mismatch without prompting.
 
-The receiver accepts one transfer, verifies it, writes it to the destination,
-and exits. If the destination name already exists, XFER chooses a numbered name
-such as `photo (1).jpg`. Use `--overwrite` to replace the exact destination.
-The receiver is discoverable on the local network by default. Use
-`--no-discovery` when you want to require manual address entry.
-
-To bind a specific interface:
-
-```console
-xfer receive --bind 0.0.0.0 --port 9100
-```
-
-The default bind address is `::`, configured as a dual-stack socket where the
-operating system supports it.
 
 ### Automation
 
@@ -260,8 +324,10 @@ For contributor architecture, test strategy, and release details, see
 
 ## Current limitations
 
-- Each `receive` invocation accepts one transfer and exits.
-- Interrupted transfers restart; resumable chunks are not implemented.
+- Ordinary CLI receive accepts one transfer; `receive --sync` keeps listening.
+- Interrupted files restart; sync reuses existing published files and blocks.
+- Two-way inventories are limited to 100,000 entries. Changed files above 256 GiB
+  fall back to sending their contents without block reuse.
 - File metadata such as ownership, ACLs, and extended attributes is not copied.
 - Entry names must be valid UTF-8 and portable across Windows, macOS, and Linux;
   case-only collisions and Windows-reserved names are rejected.

@@ -4,7 +4,31 @@ All notable changes to XFER are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Allow manual approval of changed receiver identities while still rejecting
+  concurrent conflicting changes to the peer store.
+- Support sending `.` and `..`, and validate exclusion globs for file inputs.
+- Cancel waiting and active TUI transfers and return to the form for retries.
+- Stop LAN advertisements once the receiver accepts a connection.
+- Reject excess byte/file totals before reading file data and reject ambiguous
+  wire paths, including case-colliding ancestor directories.
+- Preserve destination naming and overwrite behavior around dangling symlinks.
+- Detect source files growing or shrinking while sending.
+- Validate dry-run security options, zero connection timeouts, and TUI ports.
+
 ### Changed
+
+- Redesigned the TUI around action, folder, computer, review, and result screens;
+  Send and Receive are consecutive items in a vertical list. Added preview/apply sync and conflict choices.
+- Incremented the wire protocol to v5; both endpoints require the new build.
+
+- Replaced the nested receiving loop with a state machine that separates frame
+  validation, file verification, and final publication. Invalid frames make the
+  transfer permanently unpublishable.
+- Added a storage transaction layer that chooses collision names at publication
+  time and cleans staging on failure, including when a file is still open.
+- Bounded incoming path depth, length, entry count, and retained path metadata.
 
 - Rewrote the application as a maintainable library-first Rust project.
 - Replaced the multi-port protocol with one typed, ordered TCP record stream.
@@ -22,6 +46,11 @@ All notable changes to XFER are documented here.
 - Added optional shared-token key hardening.
 
 ### Added
+
+- Dependency-free incremental block matching using existing checksum primitives.
+- One-way and two-way folder sync, persistent comparison history, conflict
+  preservation and explicit preferences, and read-only network previews.
+- Persistent sync receiving, workflow recall, and zero-data unchanged-file skips.
 
 - IPv4/IPv6 support, exclusion globs, safe symlink following, dry-run planning,
   JSON events, peer management, diagnostics, shell completions, collision-safe

@@ -53,7 +53,15 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
     let metadata = fs::symlink_metadata(input).map_err(|error| {
         XferError::invalid_input(format!("cannot inspect {}: {error}", input.display()))
     })?;
-    let root_name = input
+    // Resolve dot/parent directory inputs without changing the names of ordinary
+    // inputs (or silently following a root symlink).
+    let named_input = if metadata.is_dir() && input.file_name().is_none() {
+        fs::canonicalize(input)?
+    } else {
+        input.to_path_buf()
+    };
+    let matcher = build_excludes(excludes)?;
+    let root_name = named_input
         .file_name()
         .and_then(OsStr::to_str)
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
@@ -90,7 +98,6 @@ pub fn build_plan(input: &Path, excludes: &[String], follow_links: bool) -> Resu
         )));
     }
 
-    let matcher = build_excludes(excludes)?;
     let canonical_root = fs::canonicalize(input)?;
     let mut entries = Vec::new();
     let mut total_bytes = 0_u64;
@@ -219,6 +226,14 @@ pub fn validate_wire_name(name: &str) -> Result<&str> {
 }
 
 pub fn safe_relative_path(path: &str) -> Result<PathBuf> {
+    // Path::components normalizes interior dots and repeated separators. Reject
+    // those aliases before platform-specific path parsing.
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(XferError::protocol(format!("unsafe entry path: {path}")));
+    }
     let candidate = Path::new(path);
     if candidate.as_os_str().is_empty() || candidate.is_absolute() {
         return Err(XferError::protocol("entry path must be relative"));
@@ -241,11 +256,19 @@ pub fn safe_relative_path(path: &str) -> Result<PathBuf> {
     Ok(candidate.to_path_buf())
 }
 
+pub(crate) fn path_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn choose_destination(output_root: &Path, root_name: &str, overwrite: bool) -> Result<PathBuf> {
     validate_wire_name(root_name)?;
     fs::create_dir_all(output_root)?;
     let preferred = output_root.join(root_name);
-    if overwrite || !preferred.exists() {
+    if overwrite || !path_exists(&preferred)? {
         return Ok(preferred);
     }
 
@@ -261,7 +284,7 @@ pub fn choose_destination(output_root: &Path, root_name: &str, overwrite: bool) 
             None => format!("{stem} ({index})"),
         };
         let candidate = output_root.join(name);
-        if !candidate.exists() {
+        if !path_exists(&candidate)? {
             return Ok(candidate);
         }
     }
@@ -595,5 +618,31 @@ mod tests {
         fs::write(&outside, b"outside").unwrap();
         symlink(&outside, root.join("escape")).unwrap();
         assert!(build_plan(&root, &[], true).is_err());
+    }
+    #[test]
+    fn wire_paths_reject_normalized_aliases() {
+        for path in ["a/./b", "a//b", "a/", "./a", "a/../b"] {
+            assert!(safe_relative_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn file_plan_rejects_invalid_excludes() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("file");
+        fs::write(&source, b"hello").unwrap();
+        assert!(build_plan(&source, &["[".into()], false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_numbering_skips_dangling_symlinks() {
+        let directory = tempdir().unwrap();
+        std::os::unix::fs::symlink("missing", directory.path().join("file")).unwrap();
+        std::os::unix::fs::symlink("missing", directory.path().join("file (1)")).unwrap();
+        assert_eq!(
+            choose_destination(directory.path(), "file", false).unwrap(),
+            directory.path().join("file (2)")
+        );
     }
 }

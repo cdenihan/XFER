@@ -1,9 +1,7 @@
 use std::{
-    collections::HashSet,
-    fs::{self, File},
-    io::{self, Read, Write},
+    io::Read,
     net::{SocketAddr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -13,25 +11,39 @@ use zeroize::Zeroize;
 
 use crate::{
     config::{Identity, Paths, TrustStore},
-    crypto::{derive_session_keys, display_fingerprint, fingerprint, sas},
+    control::TransferControl,
+    crypto::{derive_session_keys, display_fingerprint, fingerprint, sas, update_manifest},
     discovery::Advertiser,
     error::{Result, XferError},
-    filesystem::{
-        TransferPlan, build_plan, choose_destination, open_planned_file, path_to_wire,
-        portable_path_key, safe_relative_path, validate_wire_name,
-    },
+    filesystem::{TransferPlan, build_plan, open_planned_file, path_to_wire},
     net,
     protocol::{
         CHUNK_SIZE, ClientHello, Complete, Decision, EntryEnd, EntryKind, EntryStart, FrameKind,
-        Offer, RecordStream, Role, ServerHello, TransferEnd, TransferKind, client_negotiate,
-        read_client_hello, read_server_hello, sanitize_peer_text, server_negotiate,
-        write_client_hello, write_server_hello,
+        Offer, RecordStream, Role, ServerHello, TransferEnd, client_negotiate, read_client_hello,
+        read_server_hello, sanitize_peer_text, server_negotiate, write_client_hello,
+        write_server_hello,
     },
+    receiver::Receiver,
     reporter::{Progress, Reporter, TrustPrompt},
+    version::validate_peer_release_version,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConflictPolicy {
+    #[default]
+    Preserve,
+    PreferLocal,
+    PreferRemote,
+}
+
+// These flags represent independent user-facing transfer policies.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct SendOptions {
+    pub conflict_policy: ConflictPolicy,
+    pub sync: bool,
+    pub preview: bool,
+    pub two_way: bool,
     pub host: String,
     pub port: u16,
     pub input: PathBuf,
@@ -43,8 +55,10 @@ pub struct SendOptions {
     pub config_dir: Option<PathBuf>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct ReceiveOptions {
+    pub allow_sync: bool,
     pub bind: String,
     pub port: u16,
     pub output: PathBuf,
@@ -57,6 +71,9 @@ pub struct ReceiveOptions {
 
 #[derive(Clone, Debug)]
 pub struct TransferSummary {
+    pub sync_stats: Option<crate::delta::SyncStats>,
+    pub preview: bool,
+    pub conflicts: Vec<String>,
     pub destination: PathBuf,
     pub file_count: u64,
     pub total_bytes: u64,
@@ -65,11 +82,37 @@ pub struct TransferSummary {
 }
 
 pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSummary> {
+    send_controlled(options, reporter, &TransferControl::default())
+}
+
+pub fn send_controlled(
+    options: &SendOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.finish(send_inner(options, reporter, control))
+}
+
+fn send_inner(
+    options: &SendOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.check()?;
     validate_secure_token(options.secure, options.token.as_deref())?;
     let plan = build_plan(&options.input, &options.excludes, options.follow_links)?;
+    if (options.sync || options.two_way) && plan.kind != crate::protocol::TransferKind::Directory {
+        return Err(XferError::invalid_input("sync requires a directory"));
+    }
+    if options.two_way && options.follow_links {
+        return Err(XferError::invalid_input(
+            "two-way sync does not follow symlinks",
+        ));
+    }
     reporter.status(&format_plan(&plan));
     let (stream, deadline) =
         net::connect_with_deadline(&options.host, options.port, options.connect_timeout)?;
+    control.attach(&stream)?;
     let peer = stream.peer_addr()?;
     reporter.status(&format!("connected to {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
@@ -81,6 +124,13 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         reporter,
         deadline,
     )?;
+
+    if options.two_way {
+        return crate::reconcile::send(&mut session, &plan, options, reporter, control);
+    }
+    if options.sync {
+        return crate::sync::send(&mut session, &plan, options, reporter, control, None);
+    }
 
     let offer = Offer {
         root_name: plan.root_name.clone(),
@@ -105,6 +155,7 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
     let mut last_progress = Instant::now();
 
     for entry in &plan.entries {
+        control.check()?;
         let wire_path = path_to_wire(&entry.relative)?;
         session.send_message(
             FrameKind::EntryStart,
@@ -120,11 +171,19 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
 
         let mut file = open_planned_file(entry, options.follow_links)?;
         let mut hash = Sha256::new();
+        let mut sent_for_file = 0_u64;
         loop {
             let count = read_retry(&mut file, &mut buffer)?;
             if count == 0 {
                 break;
             }
+            if count as u64 > entry.size - sent_for_file {
+                return Err(XferError::invalid_input(format!(
+                    "{} grew during transfer",
+                    entry.source.display()
+                )));
+            }
+            sent_for_file += count as u64;
             hash.update(&buffer[..count]);
             session.send_frame(FrameKind::Data, &buffer[..count])?;
             transferred += count as u64;
@@ -139,6 +198,12 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
                 });
                 last_progress = Instant::now();
             }
+        }
+        if sent_for_file != entry.size {
+            return Err(XferError::invalid_input(format!(
+                "{} shrank during transfer",
+                entry.source.display()
+            )));
         }
         let digest: [u8; 32] = hash.finalize().into();
         update_manifest(&mut manifest, &wire_path, &digest);
@@ -171,6 +236,9 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
         complete.file_count
     ));
     Ok(TransferSummary {
+        sync_stats: None,
+        preview: false,
+        conflicts: Vec::new(),
         destination: PathBuf::from(complete.destination),
         file_count: complete.file_count,
         total_bytes: complete.total_bytes,
@@ -180,6 +248,23 @@ pub fn send(options: &SendOptions, reporter: &dyn Reporter) -> Result<TransferSu
 }
 
 pub fn receive(options: &ReceiveOptions, reporter: &dyn Reporter) -> Result<TransferSummary> {
+    receive_controlled(options, reporter, &TransferControl::default())
+}
+
+pub fn receive_controlled(
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.finish(receive_inner(options, reporter, control))
+}
+
+fn receive_inner(
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.check()?;
     validate_receive_options(options)?;
     let listener = net::bind(&options.bind, options.port)?;
     let local = listener.local_addr()?;
@@ -202,7 +287,7 @@ pub fn receive(options: &ReceiveOptions, reporter: &dyn Reporter) -> Result<Tran
             ));
         }
     }
-    let _advertiser = if options.discoverable {
+    let advertiser = if options.discoverable {
         match Advertiser::start(port, options.secure, local.ip()) {
             Ok(advertiser) => {
                 reporter.status("LAN discovery is on (local multicast only)");
@@ -219,7 +304,7 @@ pub fn receive(options: &ReceiveOptions, reporter: &dyn Reporter) -> Result<Tran
         reporter.status("LAN discovery is off");
         None
     };
-    receive_on_listener(&listener, options, reporter)
+    receive_on_listener_inner(&listener, options, reporter, control, advertiser)
 }
 
 pub fn receive_on_listener(
@@ -227,10 +312,24 @@ pub fn receive_on_listener(
     options: &ReceiveOptions,
     reporter: &dyn Reporter,
 ) -> Result<TransferSummary> {
+    let control = TransferControl::default();
+    control.finish(receive_on_listener_inner(
+        listener, options, reporter, &control, None,
+    ))
+}
+
+fn receive_on_listener_inner(
+    listener: &TcpListener,
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+    advertiser: Option<Advertiser>,
+) -> Result<TransferSummary> {
     validate_receive_options(options)?;
     let local = listener.local_addr()?;
     reporter.status(&format!("listening on {local}"));
-    let (stream, peer) = listener.accept()?;
+    let (stream, peer) = control.accept(listener)?;
+    drop(advertiser);
     net::configure_stream(&stream)?;
     reporter.status(&format!("connection from {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
@@ -242,7 +341,7 @@ pub fn receive_on_listener(
         reporter,
     )?;
 
-    match receive_transfer(&mut session, options, reporter, peer) {
+    match receive_transfer(&mut session, options, reporter, peer, control) {
         Ok(summary) => Ok(summary),
         Err(error) => {
             let _ = session.send_error(&error.to_string());
@@ -256,176 +355,89 @@ fn receive_transfer(
     options: &ReceiveOptions,
     reporter: &dyn Reporter,
     peer: SocketAddr,
+    control: &TransferControl,
 ) -> Result<TransferSummary> {
-    let offer: Offer = session.receive_message(FrameKind::Offer)?;
+    let (kind, payload) = session.receive_frame()?;
     net::restore_read_timeout(session.get_mut())?;
-    validate_offer(&offer)?;
-    session.send_message(FrameKind::Decision, &Decision::Accept)?;
-    reporter.status(&format!(
-        "receiving {} ({}, {} file(s))",
-        offer.root_name,
-        human_bytes(offer.total_bytes),
-        offer.file_count
-    ));
-
-    fs::create_dir_all(&options.output)?;
-    let destination = choose_destination(&options.output, &offer.root_name, options.overwrite)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".xfer-stage-")
-        .tempdir_in(&options.output)?;
-    let stage_path = staging.path().join("payload");
-    if offer.kind == TransferKind::Directory {
-        fs::create_dir(&stage_path)?;
+    let offer: Offer = serde_json::from_slice(&payload)
+        .map_err(|error| XferError::Serialization(error.to_string()))?;
+    if matches!(kind, FrameKind::SyncOffer | FrameKind::PreviewOffer) {
+        return crate::sync::receive(
+            session,
+            offer,
+            options,
+            kind == FrameKind::PreviewOffer,
+            reporter,
+            control,
+            None,
+        );
     }
-
-    let mut transferred = 0_u64;
-    let mut files_done = 0_u64;
-    let mut manifest = Sha256::new();
-    let mut seen_paths = HashSet::new();
+    if matches!(kind, FrameKind::TwoWayOffer | FrameKind::TwoWayPreview) {
+        return crate::reconcile::receive(
+            session,
+            offer,
+            options,
+            kind == FrameKind::TwoWayPreview,
+            reporter,
+            control,
+        );
+    }
+    if kind != FrameKind::Offer {
+        return Err(XferError::protocol("expected a transfer offer"));
+    }
+    let mut receiver = Receiver::new(offer, &options.output, options.overwrite)?;
+    session.send_message(FrameKind::Decision, &Decision::Accept)?;
     let mut payload = Vec::with_capacity(CHUNK_SIZE + 16);
     let mut last_progress = Instant::now();
-    for _ in 0..offer.entry_count {
-        let entry: EntryStart = session.receive_message(FrameKind::EntryStart)?;
-        let relative = safe_relative_path(&entry.path)?;
-        let portable_path = portable_path_key(&relative)?;
-        if !seen_paths.insert(portable_path) {
-            return Err(XferError::protocol(format!(
-                "duplicate entry path: {}",
-                entry.path
-            )));
+    loop {
+        control.check()?;
+        let kind = session.receive_frame_into(&mut payload)?;
+        let verified = receiver.accept(kind, &payload)?;
+        if verified || kind == FrameKind::EntryEnd || last_progress.elapsed() >= PROGRESS_INTERVAL {
+            reporter.progress(&receiver.progress());
+            last_progress = Instant::now();
         }
-        let target = match offer.kind {
-            TransferKind::File => {
-                if entry.kind != EntryKind::File || entry.path != offer.root_name {
-                    return Err(XferError::protocol(
-                        "file transfer contained an unexpected entry",
-                    ));
-                }
-                stage_path.clone()
-            }
-            TransferKind::Directory => stage_path.join(relative),
-        };
-
-        match entry.kind {
-            EntryKind::Directory => {
-                if entry.size != 0 {
-                    return Err(XferError::protocol("directory entry has a non-zero size"));
-                }
-                fs::create_dir_all(&target)?;
-            }
-            EntryKind::File => {
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut file = File::create(&target)?;
-                let mut received_for_file = 0_u64;
-                let mut hash = Sha256::new();
-                loop {
-                    let kind = session.receive_frame_into(&mut payload)?;
-                    match kind {
-                        FrameKind::Data => {
-                            received_for_file = received_for_file
-                                .checked_add(payload.len() as u64)
-                                .ok_or_else(|| XferError::protocol("file size overflow"))?;
-                            if received_for_file > entry.size {
-                                return Err(XferError::protocol(format!(
-                                    "{} exceeded its declared size",
-                                    entry.path
-                                )));
-                            }
-                            file.write_all(&payload)?;
-                            hash.update(&payload);
-                            transferred += payload.len() as u64;
-                            if last_progress.elapsed() >= PROGRESS_INTERVAL {
-                                reporter.progress(&Progress {
-                                    phase: "Receiving",
-                                    current_path: entry.path.clone(),
-                                    transferred,
-                                    total: offer.total_bytes,
-                                    files_done,
-                                    files_total: offer.file_count,
-                                });
-                                last_progress = Instant::now();
-                            }
-                        }
-                        FrameKind::EntryEnd => {
-                            let end: EntryEnd = serde_json::from_slice(&payload)
-                                .map_err(|error| XferError::Serialization(error.to_string()))?;
-                            if received_for_file != entry.size {
-                                return Err(XferError::protocol(format!(
-                                    "{} ended at {} bytes, expected {}",
-                                    entry.path, received_for_file, entry.size
-                                )));
-                            }
-                            let digest: [u8; 32] = hash.finalize().into();
-                            if digest != end.sha256 {
-                                return Err(XferError::security(format!(
-                                    "SHA-256 mismatch for {}",
-                                    entry.path
-                                )));
-                            }
-                            file.flush()?;
-                            file.sync_all()?;
-                            update_manifest(&mut manifest, &entry.path, &digest);
-                            files_done += 1;
-                            reporter.progress(&Progress {
-                                phase: "Receiving",
-                                current_path: entry.path.clone(),
-                                transferred,
-                                total: offer.total_bytes,
-                                files_done,
-                                files_total: offer.file_count,
-                            });
-                            last_progress = Instant::now();
-                            break;
-                        }
-                        other => {
-                            return Err(XferError::protocol(format!(
-                                "unexpected {other:?} while receiving {}",
-                                entry.path
-                            )));
-                        }
-                    }
-                }
-            }
+        if verified {
+            break;
         }
     }
-
-    let end: TransferEnd = session.receive_message(FrameKind::TransferEnd)?;
-    let manifest_sha256: [u8; 32] = manifest.finalize().into();
-    if end.file_count != files_done
-        || end.file_count != offer.file_count
-        || end.total_bytes != transferred
-        || end.total_bytes != offer.total_bytes
-        || end.manifest_sha256 != manifest_sha256
-    {
-        return Err(XferError::security(
-            "transfer totals or manifest digest did not verify",
-        ));
-    }
-
-    if let Some(warning) = install_staged(&stage_path, &destination, options.overwrite)? {
+    control.check()?;
+    let (installed, file_count, total_bytes, peer_version) = receiver.into_verified()?.commit()?;
+    if let Some(warning) = installed.warning {
         reporter.status(&warning);
     }
-    session.send_message(
-        FrameKind::Complete,
-        &Complete {
-            destination: destination.display().to_string(),
-            file_count: files_done,
-            total_bytes: transferred,
-            release_version: Some(crate::VERSION.into()),
-        },
-    )?;
     reporter.status(&format!(
         "saved verified transfer to {}",
-        destination.display()
+        installed.destination.display()
     ));
+    // Publication has already succeeded. A lost acknowledgement cannot undo it.
+    session
+        .send_message(
+            FrameKind::Complete,
+            &Complete {
+                sync_stats: None,
+                preview: false,
+                destination: installed.destination.display().to_string(),
+                file_count,
+                total_bytes,
+                release_version: Some(crate::VERSION.into()),
+            },
+        )
+        .map_err(|error| {
+            XferError::protocol(format!(
+                "transfer was saved to {}, but completion could not be acknowledged: {error}",
+                installed.destination.display()
+            ))
+        })?;
     Ok(TransferSummary {
-        destination,
-        file_count: files_done,
-        total_bytes: transferred,
+        sync_stats: None,
+        preview: false,
+        conflicts: Vec::new(),
+        destination: installed.destination,
+        file_count,
+        total_bytes,
         peer,
-        peer_version: offer.release_version,
+        peer_version,
     })
 }
 
@@ -435,7 +447,7 @@ fn validate_receive_options(options: &ReceiveOptions) -> Result<()> {
     validate_secure_token(options.secure, options.token.as_deref())
 }
 
-fn validate_secure_token(secure: bool, token: Option<&str>) -> Result<()> {
+pub(crate) fn validate_secure_token(secure: bool, token: Option<&str>) -> Result<()> {
     if token.is_some_and(str::is_empty) {
         return Err(XferError::invalid_input("--token must not be empty"));
     }
@@ -533,11 +545,10 @@ fn establish_client(
             return Err(XferError::security("peer was not trusted"));
         }
     }
+    let previous_fingerprint = trust.get(&endpoint).map(|peer| peer.fingerprint.clone());
     TrustStore::update(paths, |trust| {
-        if trust
-            .get(&endpoint)
-            .is_some_and(|peer| peer.fingerprint != fingerprint)
-        {
+        let current = trust.get(&endpoint).map(|peer| peer.fingerprint.as_str());
+        if current != previous_fingerprint.as_deref() && current != Some(fingerprint.as_str()) {
             return Err(XferError::security(
                 "receiver identity changed while trust was being confirmed",
             ));
@@ -604,38 +615,6 @@ fn establish_server(
     Ok(session)
 }
 
-fn validate_offer(offer: &Offer) -> Result<()> {
-    validate_wire_name(&offer.root_name)?;
-    validate_peer_release_version(offer.release_version.as_deref())?;
-    if offer.entry_count > 10_000_000 {
-        return Err(XferError::protocol("entry count exceeds safety limit"));
-    }
-    match offer.kind {
-        TransferKind::File if offer.entry_count != 1 || offer.file_count != 1 => {
-            Err(XferError::protocol("invalid file transfer counts"))
-        }
-        TransferKind::Directory if offer.file_count > offer.entry_count => {
-            Err(XferError::protocol("file count exceeds entry count"))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn validate_peer_release_version(version: Option<&str>) -> Result<()> {
-    let Some(version) = version else {
-        return Ok(());
-    };
-    if version.is_empty()
-        || version.len() > 64
-        || !version
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Err(XferError::protocol("peer sent an invalid release version"));
-    }
-    Ok(())
-}
-
 fn random_secret() -> Result<StaticSecret> {
     let mut bytes = [0_u8; 32];
     fill_random(&mut bytes)?;
@@ -649,12 +628,6 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
         .map_err(|error| XferError::security(format!("system random source failed: {error}")))
 }
 
-fn update_manifest(manifest: &mut Sha256, path: &str, digest: &[u8; 32]) {
-    manifest.update((path.len() as u64).to_be_bytes());
-    manifest.update(path.as_bytes());
-    manifest.update(digest);
-}
-
 fn read_retry(reader: &mut impl Read, buffer: &mut [u8]) -> Result<usize> {
     loop {
         match reader.read(buffer) {
@@ -663,129 +636,6 @@ fn read_retry(reader: &mut impl Read, buffer: &mut [u8]) -> Result<usize> {
             Err(error) => return Err(error.into()),
         }
     }
-}
-
-fn remove_existing(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
-        fs::remove_dir_all(path)?;
-    } else {
-        fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-fn install_staged(stage: &Path, destination: &Path, overwrite: bool) -> Result<Option<String>> {
-    if !overwrite {
-        install_noclobber(stage, destination)?;
-        return Ok(None);
-    }
-    if !destination.exists() {
-        fs::rename(stage, destination)?;
-        return Ok(None);
-    }
-
-    let parent = destination
-        .parent()
-        .ok_or_else(|| XferError::invalid_input("destination has no parent directory"))?;
-    let backup_directory = tempfile::Builder::new()
-        .prefix(".xfer-backup-")
-        .tempdir_in(parent)?
-        .keep();
-    let backup = backup_directory.join("original");
-
-    if let Err(error) = fs::rename(destination, &backup) {
-        let _ = fs::remove_dir(&backup_directory);
-        return Err(error.into());
-    }
-    if let Err(install_error) = fs::rename(stage, destination) {
-        return match fs::rename(&backup, destination) {
-            Ok(()) => {
-                let _ = fs::remove_dir(&backup_directory);
-                Err(install_error.into())
-            }
-            Err(rollback_error) => Err(XferError::Io(std::io::Error::new(
-                install_error.kind(),
-                format!(
-                    "could not install {} ({install_error}); the previous destination remains at {} because rollback failed: {rollback_error}",
-                    destination.display(),
-                    backup.display()
-                ),
-            ))),
-        };
-    }
-
-    let cleanup_warning = cleanup_overwrite_backup(&backup, &backup_directory);
-    Ok(cleanup_warning)
-}
-
-fn install_noclobber(stage: &Path, destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(stage)?;
-    if metadata.is_file() {
-        return install_file_noclobber(stage, destination, &metadata);
-    }
-    if !metadata.is_dir() {
-        return Err(XferError::invalid_input(format!(
-            "staged path {} is not a file or directory",
-            stage.display()
-        )));
-    }
-
-    fs::create_dir(destination)?;
-    let result = (|| {
-        for entry in fs::read_dir(stage)? {
-            let entry = entry?;
-            install_noclobber(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-        fs::set_permissions(destination, metadata.permissions())?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = remove_existing(destination);
-    }
-    result
-}
-
-fn install_file_noclobber(stage: &Path, destination: &Path, metadata: &fs::Metadata) -> Result<()> {
-    match fs::hard_link(stage, destination) {
-        Ok(()) => return Ok(()),
-        Err(error) if path_exists(destination) => return Err(error.into()),
-        Err(_) => {}
-    }
-
-    let mut source = File::open(stage)?;
-    let mut target = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    let result = (|| {
-        io::copy(&mut source, &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(destination, metadata.permissions())?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(destination);
-    }
-    result
-}
-
-fn path_exists(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
-}
-
-fn cleanup_overwrite_backup(backup: &Path, backup_directory: &Path) -> Option<String> {
-    let cleanup = remove_existing(backup).and_then(|()| {
-        fs::remove_dir(backup_directory)?;
-        Ok(())
-    });
-    cleanup.err().map(|error| {
-        format!(
-            "installed the replacement, but could not remove the previous destination at {}: {error}",
-            backup.display()
-        )
-    })
 }
 
 fn format_plan(plan: &TransferPlan) -> String {
@@ -819,588 +669,4 @@ pub fn human_bytes(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        net::{TcpListener, TcpStream},
-        thread,
-    };
-
-    use tempfile::tempdir;
-
-    use crate::reporter::{Progress, SilentReporter, TrustPrompt};
-
-    use super::*;
-
-    struct AcceptNewReporter;
-
-    impl Reporter for AcceptNewReporter {
-        fn status(&self, _message: &str) {}
-
-        fn progress(&self, _progress: &Progress) {}
-
-        fn show_sas(&self, _sas: &str, _fingerprint: &str) {}
-
-        fn confirm_peer(&self, prompt: &TrustPrompt) -> Result<bool> {
-            Ok(!prompt.changed)
-        }
-    }
-
-    #[test]
-    fn insecure_file_transfer_round_trips() {
-        let source_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
-        let source = source_dir.path().join("hello.txt");
-        fs::write(&source, b"hello from xfer").unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver_output = output_dir.path().to_path_buf();
-        let receiver = thread::spawn(move || {
-            receive_on_listener(
-                &listener,
-                &ReceiveOptions {
-                    bind: "127.0.0.1".into(),
-                    port,
-                    output: receiver_output,
-                    overwrite: false,
-                    discoverable: false,
-                    secure: false,
-                    token: None,
-                    config_dir: None,
-                },
-                &SilentReporter,
-            )
-            .unwrap()
-        });
-
-        send(
-            &SendOptions {
-                host: "127.0.0.1".into(),
-                port,
-                input: source,
-                excludes: Vec::new(),
-                follow_links: false,
-                secure: false,
-                token: None,
-                connect_timeout: Duration::from_secs(2),
-                config_dir: None,
-            },
-            &SilentReporter,
-        )
-        .unwrap();
-        let summary = receiver.join().unwrap();
-        assert_eq!(fs::read(summary.destination).unwrap(), b"hello from xfer");
-    }
-
-    #[test]
-    fn secure_file_transfer_round_trips() {
-        let source_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
-        let sender_config = tempdir().unwrap();
-        let receiver_config = tempdir().unwrap();
-        let source = source_dir.path().join("secure.txt");
-        fs::write(&source, b"encrypted payload").unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver_output = output_dir.path().to_path_buf();
-        let receiver_config = receiver_config.path().to_path_buf();
-        let receiver = thread::spawn(move || {
-            receive_on_listener(
-                &listener,
-                &ReceiveOptions {
-                    bind: "127.0.0.1".into(),
-                    port,
-                    output: receiver_output,
-                    overwrite: false,
-                    discoverable: false,
-                    secure: true,
-                    token: Some("shared secret".into()),
-                    config_dir: Some(receiver_config),
-                },
-                &SilentReporter,
-            )
-            .unwrap()
-        });
-
-        send(
-            &SendOptions {
-                host: "127.0.0.1".into(),
-                port,
-                input: source,
-                excludes: Vec::new(),
-                follow_links: false,
-                secure: true,
-                token: Some("shared secret".into()),
-                connect_timeout: Duration::from_secs(2),
-                config_dir: Some(sender_config.path().to_path_buf()),
-            },
-            &AcceptNewReporter,
-        )
-        .unwrap();
-        let summary = receiver.join().unwrap();
-        assert_eq!(fs::read(summary.destination).unwrap(), b"encrypted payload");
-    }
-
-    #[test]
-    fn directory_transfer_preserves_tree_and_empty_directories() {
-        let source_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
-        let source = source_dir.path().join("project");
-        fs::create_dir_all(source.join("nested/empty")).unwrap();
-        fs::write(source.join("README.md"), b"root").unwrap();
-        fs::write(source.join("nested/data.bin"), [0_u8, 1, 2, 3]).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver_output = output_dir.path().to_path_buf();
-        let receiver = thread::spawn(move || {
-            receive_on_listener(
-                &listener,
-                &ReceiveOptions {
-                    bind: "127.0.0.1".into(),
-                    port,
-                    output: receiver_output,
-                    overwrite: false,
-                    discoverable: false,
-                    secure: false,
-                    token: None,
-                    config_dir: None,
-                },
-                &SilentReporter,
-            )
-            .unwrap()
-        });
-
-        send(
-            &SendOptions {
-                host: "127.0.0.1".into(),
-                port,
-                input: source,
-                excludes: Vec::new(),
-                follow_links: false,
-                secure: false,
-                token: None,
-                connect_timeout: Duration::from_secs(2),
-                config_dir: None,
-            },
-            &SilentReporter,
-        )
-        .unwrap();
-        let summary = receiver.join().unwrap();
-        assert_eq!(
-            fs::read(summary.destination.join("README.md")).unwrap(),
-            b"root"
-        );
-        assert_eq!(
-            fs::read(summary.destination.join("nested/data.bin")).unwrap(),
-            [0_u8, 1, 2, 3]
-        );
-        assert!(summary.destination.join("nested/empty").is_dir());
-    }
-
-    #[test]
-    fn secure_handshake_rejects_wrong_token_before_trust() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server_dir = tempdir().unwrap();
-        let client_dir = tempdir().unwrap();
-        let server_paths = Paths::discover(Some(server_dir.path().to_path_buf())).unwrap();
-        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            establish_server(stream, true, Some("server"), &server_paths, &SilentReporter)
-        });
-        let stream = TcpStream::connect(address).unwrap();
-        let result = establish_client(
-            stream,
-            true,
-            Some("client"),
-            &client_paths,
-            &SilentReporter,
-            Instant::now() + Duration::from_secs(2),
-        );
-        assert!(result.is_err());
-        assert!(server.join().unwrap().is_err());
-        assert!(!client_paths.peers().exists());
-    }
-
-    #[test]
-    fn known_peer_reconnect_updates_last_seen_and_suspends_server_timeout() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server_dir = tempdir().unwrap();
-        let client_dir = tempdir().unwrap();
-        let server_paths = Paths::discover(Some(server_dir.path().to_path_buf())).unwrap();
-        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
-        let server_identity = Identity::load_or_create(&server_paths).unwrap();
-        let server_fingerprint = fingerprint(server_identity.public().as_bytes());
-        client_paths.ensure().unwrap();
-        fs::write(
-            client_paths.peers(),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "peers": {
-                    address.to_string(): {
-                        "fingerprint": server_fingerprint,
-                        "first_seen": 0,
-                        "last_seen": 0,
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut session =
-                establish_server(stream, true, None, &server_paths, &SilentReporter).unwrap();
-            session.get_mut().read_timeout().unwrap()
-        });
-        let stream = TcpStream::connect(address).unwrap();
-        establish_client(
-            stream,
-            true,
-            None,
-            &client_paths,
-            &SilentReporter,
-            Instant::now() + Duration::from_secs(2),
-        )
-        .unwrap();
-
-        assert_eq!(server.join().unwrap(), None);
-        assert!(
-            TrustStore::load(&client_paths)
-                .unwrap()
-                .get(&address.to_string())
-                .unwrap()
-                .last_seen
-                > 0
-        );
-    }
-
-    #[test]
-    fn overwrite_install_replaces_the_previous_destination() {
-        let directory = tempdir().unwrap();
-        let destination = directory.path().join("payload");
-        let stage = directory.path().join("stage");
-        fs::write(&destination, b"old").unwrap();
-        fs::write(&stage, b"new").unwrap();
-
-        install_staged(&stage, &destination, true).unwrap();
-
-        assert_eq!(fs::read(&destination).unwrap(), b"new");
-        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".xfer-backup-")
-        }));
-    }
-
-    #[test]
-    fn failed_overwrite_install_restores_the_previous_destination() {
-        let directory = tempdir().unwrap();
-        let destination = directory.path().join("payload");
-        let missing_stage = directory.path().join("missing-stage");
-        fs::write(&destination, b"old").unwrap();
-
-        assert!(install_staged(&missing_stage, &destination, true).is_err());
-
-        assert_eq!(fs::read(&destination).unwrap(), b"old");
-        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".xfer-backup-")
-        }));
-    }
-
-    #[test]
-    fn no_overwrite_install_does_not_replace_a_raced_file() {
-        let directory = tempdir().unwrap();
-        let destination = directory.path().join("payload");
-        let stage = directory.path().join("stage");
-        fs::write(&destination, b"race winner").unwrap();
-        fs::write(&stage, b"incoming").unwrap();
-
-        assert!(install_staged(&stage, &destination, false).is_err());
-        assert_eq!(fs::read(&destination).unwrap(), b"race winner");
-    }
-
-    #[test]
-    fn no_overwrite_install_does_not_replace_a_raced_directory() {
-        let directory = tempdir().unwrap();
-        let destination = directory.path().join("payload");
-        let stage = directory.path().join("stage");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("winner.txt"), b"race winner").unwrap();
-        fs::create_dir(&stage).unwrap();
-        fs::write(stage.join("incoming.txt"), b"incoming").unwrap();
-
-        assert!(install_staged(&stage, &destination, false).is_err());
-        assert_eq!(
-            fs::read(destination.join("winner.txt")).unwrap(),
-            b"race winner"
-        );
-        assert!(!destination.join("incoming.txt").exists());
-    }
-
-    #[test]
-    fn backup_cleanup_failure_is_reported_after_install_success() {
-        let directory = tempdir().unwrap();
-        let backup_directory = directory.path().join(".xfer-backup");
-        fs::create_dir(&backup_directory).unwrap();
-        let warning =
-            cleanup_overwrite_backup(&backup_directory.join("missing"), &backup_directory);
-        assert!(warning.is_some_and(|message| message.contains("installed the replacement")));
-    }
-
-    #[test]
-    fn zero_byte_file_transfer_round_trips() {
-        let source_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
-        let source = source_dir.path().join("empty.bin");
-        fs::write(&source, []).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver_output = output_dir.path().to_path_buf();
-        let receiver = thread::spawn(move || {
-            receive_on_listener(
-                &listener,
-                &ReceiveOptions {
-                    bind: "127.0.0.1".into(),
-                    port,
-                    output: receiver_output,
-                    overwrite: false,
-                    discoverable: false,
-                    secure: false,
-                    token: None,
-                    config_dir: None,
-                },
-                &SilentReporter,
-            )
-            .unwrap()
-        });
-
-        let summary = send(
-            &SendOptions {
-                host: "127.0.0.1".into(),
-                port,
-                input: source,
-                excludes: Vec::new(),
-                follow_links: false,
-                secure: false,
-                token: None,
-                connect_timeout: Duration::from_secs(2),
-                config_dir: None,
-            },
-            &SilentReporter,
-        )
-        .unwrap();
-        assert_eq!(summary.total_bytes, 0);
-        assert_eq!(
-            fs::metadata(receiver.join().unwrap().destination)
-                .unwrap()
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn receive_collision_uses_numbered_destination() {
-        let source_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
-        let source = source_dir.path().join("payload.txt");
-        fs::write(&source, b"new").unwrap();
-        fs::write(output_dir.path().join("payload.txt"), b"old").unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver_output = output_dir.path().to_path_buf();
-        let receiver = thread::spawn(move || {
-            receive_on_listener(
-                &listener,
-                &ReceiveOptions {
-                    bind: "127.0.0.1".into(),
-                    port,
-                    output: receiver_output,
-                    overwrite: false,
-                    discoverable: false,
-                    secure: false,
-                    token: None,
-                    config_dir: None,
-                },
-                &SilentReporter,
-            )
-            .unwrap()
-        });
-
-        send(
-            &SendOptions {
-                host: "127.0.0.1".into(),
-                port,
-                input: source,
-                excludes: Vec::new(),
-                follow_links: false,
-                secure: false,
-                token: None,
-                connect_timeout: Duration::from_secs(2),
-                config_dir: None,
-            },
-            &SilentReporter,
-        )
-        .unwrap();
-        let summary = receiver.join().unwrap();
-        assert_eq!(
-            fs::read(output_dir.path().join("payload.txt")).unwrap(),
-            b"old"
-        );
-        assert_eq!(
-            summary.destination,
-            output_dir.path().join("payload (1).txt")
-        );
-        assert_eq!(fs::read(summary.destination).unwrap(), b"new");
-    }
-
-    #[test]
-    fn changed_pinned_identity_is_rejected_without_store_update() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server_dir = tempdir().unwrap();
-        let client_dir = tempdir().unwrap();
-        let server_paths = Paths::discover(Some(server_dir.path().to_path_buf())).unwrap();
-        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
-        let mut trust = TrustStore::default();
-        trust.remember(address.to_string(), "00".repeat(32));
-        trust.save(&client_paths).unwrap();
-
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            establish_server(stream, true, None, &server_paths, &SilentReporter)
-        });
-        let stream = TcpStream::connect(address).unwrap();
-        assert!(
-            establish_client(
-                stream,
-                true,
-                None,
-                &client_paths,
-                &SilentReporter,
-                Instant::now() + Duration::from_secs(2),
-            )
-            .is_err()
-        );
-        assert!(server.join().unwrap().is_ok());
-        assert_eq!(
-            TrustStore::load(&client_paths)
-                .unwrap()
-                .get(&address.to_string())
-                .unwrap()
-                .fingerprint,
-            "00".repeat(32)
-        );
-    }
-
-    #[test]
-    fn offer_and_receive_option_safety_limits_are_enforced() {
-        assert!(
-            validate_offer(&Offer {
-                root_name: "file.txt".into(),
-                kind: TransferKind::File,
-                total_bytes: 0,
-                file_count: 0,
-                entry_count: 1,
-                release_version: None,
-            })
-            .is_err()
-        );
-        assert!(
-            validate_offer(&Offer {
-                root_name: "directory".into(),
-                kind: TransferKind::Directory,
-                total_bytes: 0,
-                file_count: 2,
-                entry_count: 1,
-                release_version: None,
-            })
-            .is_err()
-        );
-        assert!(
-            validate_offer(&Offer {
-                root_name: "directory".into(),
-                kind: TransferKind::Directory,
-                total_bytes: 0,
-                file_count: 0,
-                entry_count: 10_000_001,
-                release_version: None,
-            })
-            .is_err()
-        );
-
-        assert!(
-            validate_receive_options(&ReceiveOptions {
-                bind: "::".into(),
-                port: 9_000,
-                output: PathBuf::from("."),
-                overwrite: false,
-                discoverable: false,
-                secure: false,
-                token: Some("secret".into()),
-                config_dir: None,
-            })
-            .is_err()
-        );
-        assert!(validate_secure_token(true, Some("")).is_err());
-        assert!(validate_secure_token(true, Some("secret")).is_ok());
-        assert!(validate_peer_release_version(Some("2026.07.16.2")).is_ok());
-        assert!(validate_peer_release_version(Some("bad\u{1b}[2J")).is_err());
-    }
-
-    #[test]
-    fn receiver_completion_must_match_sent_totals() {
-        let complete = Complete {
-            destination: "payload".into(),
-            file_count: 2,
-            total_bytes: 10,
-            release_version: None,
-        };
-        assert!(validate_completion(&complete, 2, 10).is_ok());
-        assert!(validate_completion(&complete, 1, 10).is_err());
-        assert!(validate_completion(&complete, 2, 9).is_err());
-    }
-
-    #[test]
-    fn connect_timeout_covers_protocol_negotiation() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (_stream, _) = listener.accept().unwrap();
-            thread::sleep(Duration::from_millis(300));
-        });
-        let client_dir = tempdir().unwrap();
-        let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
-        let stream = TcpStream::connect(address).unwrap();
-        let started = Instant::now();
-        let result = establish_client(
-            stream,
-            false,
-            None,
-            &client_paths,
-            &SilentReporter,
-            Instant::now() + Duration::from_millis(50),
-        );
-
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_millis(250));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn human_byte_formatting_handles_boundaries() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(1_023), "1023 B");
-        assert_eq!(human_bytes(1_024), "1.0 KiB");
-        assert_eq!(human_bytes(1_536), "1.5 KiB");
-        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
-    }
-}
+mod tests;

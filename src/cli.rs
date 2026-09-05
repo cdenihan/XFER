@@ -38,7 +38,7 @@ pub struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -76,10 +76,58 @@ enum Command {
         token: Option<String>,
 
         /// Maximum time to establish a connection.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
         connect_timeout: u64,
 
         /// Inspect and report the transfer plan without connecting.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Sync a directory, sending only changed data. Preserve destination-only files.
+    Sync {
+        /// Resolve file conflicts using this side, the other side, or neither.
+        #[arg(long, value_enum, default_value_t = crate::transfer::ConflictPolicy::Preserve, requires = "two_way")]
+        conflicts: crate::transfer::ConflictPolicy,
+        /// Sync changes in both directions, preserving conflicting versions.
+        #[arg(long)]
+        two_way: bool,
+
+        /// Receiver host name or IPv4/IPv6 address.
+        host: String,
+
+        /// File or directory to send.
+        path: PathBuf,
+
+        /// Receiver TCP port.
+        #[arg(short, long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+
+        /// Exclude a glob from a directory transfer; repeat as needed.
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Follow symlinks that remain inside the transfer root.
+        #[arg(long)]
+        follow_links: bool,
+
+        /// Disable encryption and peer authentication.
+        #[arg(long, alias = "no-secure")]
+        insecure: bool,
+
+        /// Trust an unseen peer without prompting. Changed identities still require confirmation.
+        #[arg(long)]
+        accept_new: bool,
+
+        /// Mix a shared secret into session key derivation.
+        #[arg(long, env = "XFER_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+
+        /// Maximum time to establish a connection.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
+        connect_timeout: u64,
+
+        /// Compare with the receiver without changing destination files.
         #[arg(long)]
         dry_run: bool,
     },
@@ -97,6 +145,14 @@ enum Command {
         /// TCP port to listen on.
         #[arg(short, long, default_value_t = DEFAULT_PORT)]
         port: u16,
+
+        /// Exit after one session instead of continuing to accept syncs.
+        #[arg(long)]
+        once: bool,
+
+        /// Allow incremental and two-way sync updates to this output folder.
+        #[arg(long = "sync")]
+        allow_sync: bool,
 
         /// Replace an existing destination with the same name.
         #[arg(long)]
@@ -173,7 +229,14 @@ enum PeerCommand {
 
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    let Some(command) = cli.command else {
+        if io::stdin().is_terminal() && !cli.json {
+            return tui::run(cli.config_dir);
+        }
+        Cli::command().print_help()?;
+        return Ok(());
+    };
+    match command {
         Command::Send {
             host,
             path,
@@ -186,6 +249,7 @@ pub fn run() -> anyhow::Result<()> {
             connect_timeout,
             dry_run,
         } => {
+            crate::transfer::validate_secure_token(!insecure, token.as_deref())?;
             if dry_run {
                 let plan = build_plan(&path, &exclude, follow_links)?;
                 if cli.json {
@@ -215,6 +279,10 @@ pub fn run() -> anyhow::Result<()> {
             let reporter = CliReporter::new(accept_new, cli.json);
             let summary = send(
                 &SendOptions {
+                    conflict_policy: crate::transfer::ConflictPolicy::Preserve,
+                    sync: false,
+                    preview: false,
+                    two_way: false,
                     host,
                     port,
                     input: path,
@@ -231,7 +299,55 @@ pub fn run() -> anyhow::Result<()> {
             print_summary(&summary, cli.json, "sent");
             handle_version_mismatch(&summary, cli.json)?;
         }
+        Command::Sync {
+            conflicts,
+            host,
+            path,
+            port,
+            exclude,
+            follow_links,
+            insecure,
+            accept_new,
+            token,
+            connect_timeout,
+            dry_run,
+            two_way,
+        } => {
+            let reporter = CliReporter::new(accept_new, cli.json);
+            let summary = send(
+                &SendOptions {
+                    conflict_policy: conflicts,
+                    host,
+                    port,
+                    input: path,
+                    excludes: exclude,
+                    follow_links,
+                    secure: !insecure,
+                    token,
+                    connect_timeout: Duration::from_secs(connect_timeout),
+                    config_dir: cli.config_dir,
+                    sync: true,
+                    preview: dry_run,
+                    two_way,
+                },
+                &reporter,
+            )?;
+            reporter.finish();
+            print_summary(
+                &summary,
+                cli.json,
+                if dry_run { "preview" } else { "synced" },
+            );
+            if !summary.conflicts.is_empty() {
+                anyhow::bail!(
+                    "{} conflict(s) preserved; resolve them and sync again",
+                    summary.conflicts.len()
+                );
+            }
+        }
         Command::Receive {
+            once,
+            allow_sync,
             output,
             bind,
             port,
@@ -241,22 +357,28 @@ pub fn run() -> anyhow::Result<()> {
             token,
         } => {
             let reporter = CliReporter::new(false, cli.json);
-            let summary = receive(
-                &ReceiveOptions {
-                    bind,
-                    port,
-                    output,
-                    overwrite,
-                    discoverable: !no_discovery,
-                    secure: !insecure,
-                    token,
-                    config_dir: cli.config_dir,
-                },
-                &reporter,
-            )?;
-            reporter.finish();
-            print_summary(&summary, cli.json, "received");
-            handle_version_mismatch(&summary, cli.json)?;
+            loop {
+                let summary = receive(
+                    &ReceiveOptions {
+                        allow_sync,
+                        bind: bind.clone(),
+                        port,
+                        output: output.clone(),
+                        overwrite,
+                        discoverable: !no_discovery,
+                        secure: !insecure,
+                        token: token.clone(),
+                        config_dir: cli.config_dir.clone(),
+                    },
+                    &reporter,
+                )?;
+                reporter.finish();
+                print_summary(&summary, cli.json, "received");
+                handle_version_mismatch(&summary, cli.json)?;
+                if once || !allow_sync {
+                    break;
+                }
+            }
         }
         Command::Tui => tui::run(cli.config_dir)?,
         Command::Ip => {
@@ -434,8 +556,28 @@ fn print_summary(summary: &crate::transfer::TransferSummary, json: bool, action:
                 "total_bytes": summary.total_bytes,
                 "peer": summary.peer,
                 "peer_version": summary.peer_version,
+                "sync": summary.sync_stats,
+                "preview": summary.preview,
+                "conflicts": summary.conflicts,
             })
         );
+    } else if let Some(stats) = summary.sync_stats {
+        println!(
+            "{}: {} file(s) to update, {} unchanged; {} to send, {} reused",
+            if summary.preview {
+                "Preview"
+            } else {
+                "Sync complete"
+            },
+            stats.changed_files,
+            stats.unchanged_files,
+            human_bytes(stats.sent_bytes),
+            human_bytes(stats.reused_bytes)
+        );
+        println!("Destination: {}", summary.destination.display());
+        for conflict in &summary.conflicts {
+            println!("Conflict preserved: {conflict}");
+        }
     } else {
         println!(
             "{} {} across {} file(s) with {}",
