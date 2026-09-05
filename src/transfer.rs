@@ -59,6 +59,8 @@ pub struct SendOptions {
 #[derive(Clone, Debug)]
 pub struct ReceiveOptions {
     pub allow_sync: bool,
+    /// Sync directly into output instead of a child named after the source.
+    pub sync_into: bool,
     pub bind: String,
     pub port: u16,
     pub output: PathBuf,

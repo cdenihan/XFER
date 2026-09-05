@@ -748,6 +748,7 @@ impl App {
         };
         let receiver = ReceiveOptions {
             allow_sync: self.allow_sync,
+            sync_into: true,
             bind: self.bind.clone(),
             port: self.port,
             output: self.path.clone(),
@@ -1063,7 +1064,7 @@ impl App {
                 Line::from(format!("Port     {}", self.port)),
                 Line::from(""),
                 Line::from(if self.allow_sync {
-                    "Sync access ON — updates and two-way reads in this folder."
+                    "Sync access ON — sync directly into the selected folder."
                 } else {
                     "Copies only. Press s to allow folder syncs."
                 }),
@@ -1137,7 +1138,15 @@ impl App {
             accent(),
         )];
         if self.action == Action::Receive {
-            lines.push(Line::from(format!("Saving inside {}", self.path.display())));
+            lines.push(Line::from(format!(
+                "{} {}",
+                if self.allow_sync {
+                    "Syncing into"
+                } else {
+                    "Saving inside"
+                },
+                self.path.display()
+            )));
             lines.push(Line::from(format!(
                 "Connect to {}",
                 self.addresses
@@ -1195,7 +1204,7 @@ impl App {
                 Paragraph::new(format!(
                     "Last session: {}\n{}",
                     if summary.preview {
-                        "Preview completed"
+                        "Preview completed — no files changed.\nPress Enter on the sending computer to apply the sync."
                     } else {
                         "Files saved"
                     },

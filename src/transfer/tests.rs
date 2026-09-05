@@ -39,6 +39,7 @@ fn insecure_file_transfer_round_trips() {
             &listener,
             &ReceiveOptions {
                 allow_sync: false,
+                sync_into: false,
                 bind: "127.0.0.1".into(),
                 port,
                 output: receiver_output,
@@ -94,6 +95,7 @@ fn secure_file_transfer_round_trips() {
             &listener,
             &ReceiveOptions {
                 allow_sync: false,
+                sync_into: false,
                 bind: "127.0.0.1".into(),
                 port,
                 output: receiver_output,
@@ -147,6 +149,7 @@ fn directory_transfer_preserves_tree_and_empty_directories() {
             &listener,
             &ReceiveOptions {
                 allow_sync: false,
+                sync_into: false,
                 bind: "127.0.0.1".into(),
                 port,
                 output: receiver_output,
@@ -286,6 +289,7 @@ fn zero_byte_file_transfer_round_trips() {
             &listener,
             &ReceiveOptions {
                 allow_sync: false,
+                sync_into: false,
                 bind: "127.0.0.1".into(),
                 port,
                 output: receiver_output,
@@ -343,6 +347,7 @@ fn receive_collision_uses_numbered_destination() {
             &listener,
             &ReceiveOptions {
                 allow_sync: false,
+                sync_into: false,
                 bind: "127.0.0.1".into(),
                 port,
                 output: receiver_output,
@@ -466,6 +471,7 @@ fn offer_and_receive_option_safety_limits_are_enforced() {
     assert!(
         validate_receive_options(&ReceiveOptions {
             allow_sync: false,
+            sync_into: false,
             bind: "::".into(),
             port: 9_000,
             output: PathBuf::from("."),
@@ -610,6 +616,7 @@ fn rejected_transfer(script: impl FnOnce(&mut RecordStream<TcpStream>)) -> Strin
     let address = listener.local_addr().unwrap();
     let options = ReceiveOptions {
         allow_sync: false,
+        sync_into: false,
         bind: "127.0.0.1".into(),
         port: 0,
         output: output.path().into(),
@@ -764,6 +771,7 @@ fn interrupted_and_corrupt_transfers_preserve_destination_and_remove_staging() {
 }
 
 struct SyncPair {
+    direct_output: Option<PathBuf>,
     listener: TcpListener,
     source: tempfile::TempDir,
     output: tempfile::TempDir,
@@ -773,6 +781,7 @@ struct SyncPair {
 impl SyncPair {
     fn new() -> Self {
         Self {
+            direct_output: None,
             listener: TcpListener::bind("127.0.0.1:0").unwrap(),
             source: tempdir().unwrap(),
             output: tempdir().unwrap(),
@@ -784,7 +793,9 @@ impl SyncPair {
         self.source.path().join("data")
     }
     fn remote(&self) -> PathBuf {
-        self.output.path().join("data")
+        self.direct_output
+            .clone()
+            .unwrap_or_else(|| self.output.path().join("data"))
     }
     fn run(&self, two_way: bool, preview: bool) -> Result<TransferSummary> {
         self.run_policy(two_way, preview, ConflictPolicy::Preserve)
@@ -798,9 +809,13 @@ impl SyncPair {
         let listener = self.listener.try_clone().unwrap();
         let options = ReceiveOptions {
             allow_sync: true,
+            sync_into: self.direct_output.is_some(),
             bind: "127.0.0.1".into(),
             port: listener.local_addr().unwrap().port(),
-            output: self.output.path().into(),
+            output: self
+                .direct_output
+                .clone()
+                .unwrap_or_else(|| self.output.path().into()),
             overwrite: false,
             discoverable: false,
             secure: true,
@@ -988,4 +1003,97 @@ fn explicit_conflict_resolution_previews_then_applies_the_selected_side() {
     pair.run_policy(true, false, ConflictPolicy::PreferLocal)
         .unwrap();
     assert_eq!(fs::read(pair.remote().join("file")).unwrap(), b"left edit");
+}
+
+#[test]
+fn direct_sync_previews_then_updates_existing_folder_without_nesting() {
+    let mut pair = SyncPair::new();
+    pair.direct_output = Some(pair.remote());
+    fs::create_dir_all(pair.local()).unwrap();
+    fs::create_dir_all(pair.remote()).unwrap();
+    fs::write(pair.local().join("changed.rs"), b"new code").unwrap();
+    fs::write(pair.remote().join("changed.rs"), b"old code").unwrap();
+    fs::write(pair.local().join("same.rs"), b"unchanged").unwrap();
+    fs::write(pair.remote().join("same.rs"), b"unchanged").unwrap();
+    fs::write(pair.remote().join("local-only"), b"keep").unwrap();
+
+    let preview = pair.run(false, true).unwrap();
+    assert_eq!(
+        preview.destination,
+        fs::canonicalize(pair.remote()).unwrap()
+    );
+    assert_eq!(preview.sync_stats.unwrap().changed_files, 1);
+    assert_eq!(preview.sync_stats.unwrap().unchanged_files, 1);
+    assert_eq!(
+        fs::read(pair.remote().join("changed.rs")).unwrap(),
+        b"old code"
+    );
+    assert!(!pair.remote().join("data").exists());
+
+    let applied = pair.run(false, false).unwrap();
+    assert!(!applied.preview);
+    assert_eq!(
+        applied.destination,
+        fs::canonicalize(pair.remote()).unwrap()
+    );
+    assert_eq!(
+        fs::read(pair.remote().join("changed.rs")).unwrap(),
+        b"new code"
+    );
+    assert_eq!(fs::read(pair.remote().join("local-only")).unwrap(), b"keep");
+    assert!(!pair.remote().join("data").exists());
+    assert_eq!(
+        pair.run(false, true)
+            .unwrap()
+            .sync_stats
+            .unwrap()
+            .changed_files,
+        0
+    );
+}
+
+#[test]
+fn direct_two_way_sync_supports_differently_named_destination() {
+    let mut pair = SyncPair::new();
+    pair.direct_output = Some(pair.output.path().join("other-checkout"));
+    fs::create_dir_all(pair.local()).unwrap();
+    fs::create_dir_all(pair.remote()).unwrap();
+    fs::write(pair.local().join("from-source"), b"source").unwrap();
+    fs::write(pair.remote().join("from-receiver"), b"receiver").unwrap();
+    let preview = pair.run(true, true).unwrap();
+    assert_eq!(preview.sync_stats.unwrap().changed_files, 2);
+    assert!(!pair.local().join("from-receiver").exists());
+    assert!(!pair.remote().join("from-source").exists());
+    pair.run(true, false).unwrap();
+    assert_eq!(
+        fs::read(pair.local().join("from-receiver")).unwrap(),
+        b"receiver"
+    );
+    assert_eq!(
+        fs::read(pair.remote().join("from-source")).unwrap(),
+        b"source"
+    );
+    assert!(!pair.remote().join("data").exists());
+    assert!(!pair.source.path().join("other-checkout").exists());
+    fs::write(pair.remote().join("from-source"), b"edited remotely").unwrap();
+    pair.run(true, false).unwrap();
+    assert_eq!(
+        fs::read(pair.local().join("from-source")).unwrap(),
+        b"edited remotely"
+    );
+}
+
+#[test]
+fn direct_sync_preview_leaves_missing_destination_absent() {
+    for two_way in [false, true] {
+        let mut pair = SyncPair::new();
+        pair.direct_output = Some(pair.output.path().join("missing"));
+        fs::create_dir_all(pair.local()).unwrap();
+        fs::write(pair.local().join("file"), b"new").unwrap();
+        pair.run(two_way, true).unwrap();
+        assert!(!pair.remote().exists());
+        pair.run(two_way, false).unwrap();
+        assert_eq!(fs::read(pair.remote().join("file")).unwrap(), b"new");
+        assert!(!pair.remote().join("data").exists());
+    }
 }

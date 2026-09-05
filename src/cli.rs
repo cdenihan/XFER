@@ -154,6 +154,10 @@ enum Command {
         #[arg(long = "sync")]
         allow_sync: bool,
 
+        /// Sync directly into --output instead of a child named after the source.
+        #[arg(long, requires = "allow_sync")]
+        sync_into: bool,
+
         /// Replace an existing destination with the same name.
         #[arg(long)]
         overwrite: bool,
@@ -348,6 +352,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Receive {
             once,
             allow_sync,
+            sync_into,
             output,
             bind,
             port,
@@ -361,6 +366,7 @@ pub fn run() -> anyhow::Result<()> {
                 let summary = receive(
                     &ReceiveOptions {
                         allow_sync,
+                        sync_into,
                         bind: bind.clone(),
                         port,
                         output: output.clone(),

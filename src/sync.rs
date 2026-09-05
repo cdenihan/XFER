@@ -275,6 +275,21 @@ fn stamp(path: &Path) -> Result<Option<Stamp>> {
     }
 }
 
+/// Resolve the explicitly selected sync layout identically for inventory,
+/// preview, and application. Canonicalize the user-selected output directory.
+pub(crate) fn destination(options: &ReceiveOptions, root_name: &str) -> Result<PathBuf> {
+    let output = if options.output.exists() {
+        fs::canonicalize(&options.output)?
+    } else {
+        options.output.clone()
+    };
+    Ok(if options.sync_into {
+        output
+    } else {
+        output.join(root_name)
+    })
+}
+
 pub(crate) fn receive(
     session: &mut RecordStream<TcpStream>,
     offer: Offer,
@@ -301,7 +316,7 @@ pub(crate) fn receive(
     } else {
         options.output.clone()
     };
-    let root = output.join(&offer.root_name);
+    let root = destination(options, &offer.root_name)?;
     checked_target(&root, Path::new(""))?;
     if root.exists() && !root.is_dir() {
         return Err(XferError::invalid_input(

@@ -275,6 +275,7 @@ pub(crate) fn send(
     }
     let receive_options = ReceiveOptions {
         allow_sync: true,
+        sync_into: false,
         output: source
             .parent()
             .ok_or_else(|| XferError::invalid_input("cannot sync filesystem root"))?
@@ -359,9 +360,9 @@ pub(crate) fn receive(
     if request.excludes.len() > 256 {
         return Err(XferError::protocol("too many exclusion patterns"));
     }
-    let root = options.output.join(&offer.root_name);
+    let root = crate::sync::destination(options, &offer.root_name)?;
     crate::sync::checked_target(&root, Path::new(""))?;
-    let plan = if root.exists() {
+    let mut plan = if root.exists() {
         build_plan(&root, &request.excludes, false)?
     } else {
         TransferPlan {
@@ -379,13 +380,10 @@ pub(crate) fn receive(
         ));
     }
     let remote = inventory(&plan, control)?;
-    let root_identity = if root.exists() {
-        fs::canonicalize(&root)?
-    } else {
-        fs::canonicalize(&options.output)
-            .unwrap_or_else(|_| options.output.clone())
-            .join(&offer.root_name)
-    };
+    // The wire name identifies the sender's folder, even when the receiver
+    // explicitly selected a folder with a different local name.
+    plan.root_name.clone_from(&offer.root_name);
+    let root_identity = root.clone();
     session.send_message(
         FrameKind::Basis,
         &InventoryHeader {

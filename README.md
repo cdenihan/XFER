@@ -104,7 +104,10 @@ address), and review the operation. Sync always shows a preview before applying.
 Use arrows and Enter to navigate, `p` to enter a folder path, and `m` to enter
 an address. Receive mode shows the addresses other computers can use and keeps
 listening after a session. Enable sync access on its review screen to permit
-updates and two-way reads. During a conflict preview, `l` prefers local files,
+updates and two-way reads directly in the selected folder (without appending
+the sender’s folder name). After reviewing the preview, press Enter on the
+sending computer to apply; the receiver keeps waiting until you do. Copies
+still save the incoming item inside the selected folder. During a conflict preview, `l` prefers local files,
 `r` prefers remote files, and `s` preserves both versions; each choice refreshes
 the preview before applying. Esc cancels waiting or active work. Completed and
 failed operations can be retried, and the last workflow is remembered without
@@ -190,6 +193,17 @@ blocks already at the destination, including blocks shifted by insertions;
 only unmatched data travels across the connection. Comparisons read file
 contents rather than relying on modification times. Reported transferred bytes
 exclude encryption, metadata, and block-signature overhead.
+
+To sync into an existing checkout itself, select that folder in the interactive
+receiver, or use `--sync-into` on the command line:
+
+```console
+xfer receive --sync --sync-into --output ~/Developer/PlatinumBankingSystem
+```
+
+This updates files directly in `PlatinumBankingSystem`, even if the sending
+folder has a different name. Without `--sync-into`, the CLI keeps the parent
+folder behavior shown above.
 
 Two-way sync remembers the last successful common file hashes on the initiating
 machine. Changes made on just one side flow to the other. If both sides changed,
