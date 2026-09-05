@@ -1,6 +1,6 @@
 [package]
 name = "xfer"
-version = "2026.9.5-3"
+version = "2026.9.5-4"
 edition = "2024"
 rust-version = "1.88"
 description = "Secure, cross-platform file and directory transfer for local networks"
