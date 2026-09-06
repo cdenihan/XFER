@@ -279,7 +279,12 @@ pub fn build_plan_with_gitignore(
             continue;
         }
 
-        let portable_key = portable_path_key(relative)?;
+        let portable_key = portable_path_key(relative).map_err(|error| {
+            XferError::invalid_input(format!(
+                "cannot transfer {}: {error}. Rename this entry, exclude it (or its parent directory) with --exclude, or send an archive to preserve its original name",
+                entry.path().display()
+            ))
+        })?;
         if !portable_paths.insert(portable_key) {
             return Err(XferError::invalid_input(format!(
                 "{} collides with another path when compared case-insensitively",
@@ -641,6 +646,25 @@ mod tests {
         fs::write(directory.path().join("photo.jpg"), b"existing").unwrap();
         let destination = choose_destination(directory.path(), "photo.jpg", false).unwrap();
         assert_eq!(destination, directory.path().join("photo (1).jpg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_portable_source_reports_full_path_and_can_be_excluded() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("project");
+        let dependency = root.join("node_modules").join("package");
+        fs::create_dir_all(&dependency).unwrap();
+        let invalid = dependency.join("node:child_process");
+        fs::write(&invalid, b"dependency").unwrap();
+        fs::write(root.join("source.txt"), b"source").unwrap();
+        let error = build_plan(&root, &[], false).unwrap_err().to_string();
+        assert!(error.contains(&invalid.display().to_string()));
+        assert!(error.contains("--exclude"));
+        assert!(error.contains("archive"));
+        let plan = build_plan(&root, &["node_modules".into()], false).unwrap();
+        assert_eq!(plan.file_count, 1);
+        assert_eq!(plan.total_bytes, 6);
     }
 
     #[test]

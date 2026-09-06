@@ -151,6 +151,26 @@ XFER_TOKEN='correct horse battery staple' \
 Symlinks are skipped by default. `--follow-links` follows only links whose
 resolved targets remain inside the transfer root.
 
+XFER requires portable filenames, including when both computers run macOS or
+Linux. A name such as `node:child_process` contains `:`, which Windows cannot
+represent. The error identifies the source path. Rename the entry or exclude
+its containing dependency directory, for example:
+
+```console
+xfer send 192.168.1.42 ./project --exclude 'node_modules'
+```
+
+If every original filename must be preserved, create a tar archive and send that
+file, then extract it on a filesystem that supports those names. Exclusions are
+also available in the TUI review screen. The progress view shows both completed
+files and transferred bytes: the file count stays unchanged during a large file,
+and the sender can pause while the receiver drains buffered data. Press `d` for
+current throughput (a rolling two-second rate), average throughput, byte totals,
+and measured elapsed time alongside the logs. Rates measure reported payload
+bytes from the first progress sample, exclude preparation/connection time and
+protocol overhead, and reset for each transfer or phase. Stalls reduce the
+current rate to zero; completed statistics remain available in Details.
+
 ### Receive
 
 ```console

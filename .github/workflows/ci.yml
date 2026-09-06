@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       checks: write
-    uses: cdenihan/rust-cli-toolkit/.github/workflows/rust-ci.yml@v2.0.0
+    uses: ./.github/workflows/rust-ci.yml
     with:
       binary-name: xfer
       display-name: XFER

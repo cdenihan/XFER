@@ -36,7 +36,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         mpsc::{self, Receiver, SyncSender},
     },
     thread,
@@ -241,15 +241,77 @@ impl Folder {
         self.entries.len() + 2
     }
 }
+#[derive(Default)]
+struct TransferRates {
+    samples: VecDeque<(Instant, u64)>,
+    first: Option<(Instant, u64)>,
+    phase: &'static str,
+    total: u64,
+    finished: bool,
+}
+impl TransferRates {
+    fn sample(&mut self, progress: &Progress, now: Instant) {
+        if self.finished
+            || self.phase != progress.phase
+            || self.total != progress.total
+            || self
+                .samples
+                .back()
+                .is_some_and(|(_, bytes)| *bytes > progress.transferred)
+        {
+            *self = Self::default();
+        }
+        self.phase = progress.phase;
+        self.total = progress.total;
+        self.first.get_or_insert((now, progress.transferred));
+        self.samples.push_back((now, progress.transferred));
+        // Keep the boundary sample for a rolling two-second rate, including idle polls.
+        while self.samples.len() > 2
+            && now.duration_since(self.samples[1].0) >= Duration::from_secs(2)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    fn rate(start: (Instant, u64), end: (Instant, u64)) -> String {
+        let nanos = end.0.duration_since(start.0).as_nanos();
+        if nanos == 0 {
+            return "Measuring…".into();
+        }
+        let bytes = u128::from(end.1.saturating_sub(start.1)) * 1_000_000_000 / nanos;
+        format!(
+            "{}/s",
+            human_bytes(u64::try_from(bytes).unwrap_or(u64::MAX))
+        )
+    }
+
+    fn description(&self) -> Option<String> {
+        let first = self.first?;
+        let recent = *self.samples.front()?;
+        let last = *self.samples.back()?;
+        Some(format!(
+            "{} · Current: {} · Average: {}\n{} / {} · Measured: {}s",
+            self.phase,
+            Self::rate(recent, last),
+            Self::rate(first, last),
+            human_bytes(last.1),
+            human_bytes(self.total),
+            last.0.duration_since(first.0).as_secs(),
+        ))
+    }
+}
+
 struct UiReporter {
     tx: SyncSender<WorkerEvent>,
+    latest_progress: Arc<Mutex<Option<Progress>>>,
 }
 impl Reporter for UiReporter {
     fn status(&self, message: &str) {
         let _ = self.tx.send(WorkerEvent::Status(message.into()));
     }
     fn progress(&self, progress: &Progress) {
-        let _ = self.tx.send(WorkerEvent::Progress(progress.clone()));
+        // Progress is a snapshot, not an event: never queue every completed file.
+        *self.latest_progress.lock().expect("progress mutex") = Some(progress.clone());
     }
     fn show_sas(&self, sas: &str, fingerprint: &str) {
         let _ = self
@@ -266,7 +328,6 @@ impl Reporter for UiReporter {
 }
 enum WorkerEvent {
     Status(String),
-    Progress(Progress),
     Sas(String, String),
     Trust(TrustPrompt, SyncSender<bool>),
     Received(TransferSummary),
@@ -297,12 +358,13 @@ struct App {
     rx: Receiver<WorkerEvent>,
     control: Arc<TransferControl>,
     progress: Option<Progress>,
+    latest_progress: Arc<Mutex<Option<Progress>>>,
     logs: VecDeque<String>,
     trust: Option<(TrustPrompt, SyncSender<bool>)>,
     sas: Option<String>,
     summary: Option<TransferSummary>,
     recent: Option<Recent>,
-    started: Instant,
+    rates: TransferRates,
     details: bool,
 }
 impl App {
@@ -346,12 +408,13 @@ impl App {
             rx,
             control: Arc::new(TransferControl::default()),
             progress: None,
+            latest_progress: Arc::default(),
             logs: VecDeque::new(),
             trust: None,
             sas: None,
             summary: None,
             recent,
-            started: Instant::now(),
+            rates: TransferRates::default(),
             details: false,
         }
     }
@@ -384,13 +447,24 @@ impl App {
         if self.screen == Screen::Computer {
             self.selection = self.selection.min(self.peers.len());
         }
+        if let Some(progress) = self.latest_progress.lock().expect("progress mutex").take() {
+            if self.progress.is_none() {
+                self.rates = TransferRates::default();
+            }
+            self.progress = Some(progress);
+        }
+        if self.screen == Screen::Running
+            && !self.rates.finished
+            && let Some(progress) = &self.progress
+        {
+            self.rates.sample(progress, Instant::now());
+        }
         for _ in 0..128 {
             let Ok(event) = self.rx.try_recv() else {
                 break;
             };
             match event {
                 WorkerEvent::Status(message) => self.log(message),
-                WorkerEvent::Progress(progress) => self.progress = Some(progress),
                 WorkerEvent::Sas(sas, fingerprint) => {
                     self.sas = Some(sas);
                     self.log(format!("Receiver identity: {fingerprint}"));
@@ -403,6 +477,7 @@ impl App {
                     }
                 }
                 WorkerEvent::Received(summary) => {
+                    self.rates.finished = true;
                     self.log(format!(
                         "{}: {}",
                         if summary.preview {
@@ -417,6 +492,7 @@ impl App {
                     self.sas = None;
                 }
                 WorkerEvent::Finished(result) => {
+                    self.rates.finished = true;
                     self.trust = None;
                     match result {
                         Ok(summary) => {
@@ -727,16 +803,18 @@ impl App {
             return;
         }
         self.control = Arc::new(TransferControl::default());
+        self.latest_progress = Arc::default();
         self.progress = None;
         self.summary = None;
         self.logs.clear();
         self.error = None;
         self.sas = None;
         self.details = false;
-        self.started = Instant::now();
+        self.rates = TransferRates::default();
         self.screen = Screen::Running;
         let control = Arc::clone(&self.control);
         let tx = self.tx.clone();
+        let latest_progress = Arc::clone(&self.latest_progress);
         let action = self.action;
         let sender = SendOptions {
             conflict_policy: self.conflict_policy,
@@ -767,7 +845,10 @@ impl App {
             config_dir: self.config_dir.clone(),
         };
         thread::spawn(move || {
-            let reporter = UiReporter { tx: tx.clone() };
+            let reporter = UiReporter {
+                tx: tx.clone(),
+                latest_progress,
+            };
             let result = if action == Action::Receive {
                 loop {
                     match receive_controlled(&receiver, &reporter, &control) {
@@ -1219,6 +1300,17 @@ impl App {
         }
         if self.details {
             self.draw_logs(frame, rows[2]);
+        } else if let Some(progress) = &self.progress {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} / {} transferred\n{}",
+                    human_bytes(progress.transferred),
+                    human_bytes(progress.total),
+                    progress.current_path,
+                ))
+                .wrap(Wrap { trim: false }),
+                rows[2],
+            );
         } else if let Some(summary) = &self.summary {
             frame.render_widget(
                 Paragraph::new(format!(
@@ -1350,6 +1442,18 @@ impl App {
         );
     }
     fn draw_logs(&self, frame: &mut Frame<'_>, area: Rect) {
+        let area = if let Some(statistics) = self.rates.description() {
+            let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(area);
+            frame.render_widget(
+                Paragraph::new(statistics)
+                    .wrap(Wrap { trim: false })
+                    .block(panel("Transfer rate")),
+                rows[0],
+            );
+            rows[1]
+        } else {
+            area
+        };
         let lines = self
             .logs
             .iter()
@@ -1473,6 +1577,149 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    fn progress_coalesces_without_filling_the_worker_queue() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let latest_progress = Arc::default();
+        let reporter = UiReporter {
+            tx,
+            latest_progress: Arc::clone(&latest_progress),
+        };
+        // Even a full event queue must not block transfer progress.
+        reporter.status("connected");
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            for files_done in 0..10_000 {
+                reporter.progress(&Progress {
+                    phase: "Sending",
+                    current_path: "file.bin".into(),
+                    transferred: files_done,
+                    total: 10_000,
+                    files_done,
+                    files_total: 10_000,
+                });
+            }
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("progress must not wait for UI polling");
+        worker.join().unwrap();
+        assert_eq!(
+            latest_progress.lock().unwrap().take().unwrap().files_done,
+            9_999
+        );
+        assert!(matches!(rx.try_recv().unwrap(), WorkerEvent::Status(_)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn running_view_shows_bytes_while_file_count_is_unchanged() {
+        let config = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(config.path().into()));
+        app.screen = Screen::Running;
+        *app.latest_progress.lock().unwrap() = Some(Progress {
+            phase: "Sending",
+            current_path: "large-file.bin".into(),
+            transferred: 1024,
+            total: 2048,
+            files_done: 0,
+            files_total: 1,
+        });
+        app.poll();
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("0 / 1 files"));
+        assert!(rendered.contains("1.0 KiB / 2.0 KiB transferred"));
+        assert!(rendered.contains("large-file.bin"));
+    }
+
+    #[test]
+    fn transfer_rates_measure_throughput_stalls_and_phase_resets() {
+        let start = Instant::now();
+        let mut rates = TransferRates::default();
+        let mut progress = Progress {
+            phase: "Sending",
+            current_path: "file".into(),
+            transferred: 0,
+            total: 4096,
+            files_done: 0,
+            files_total: 1,
+        };
+        rates.sample(&progress, start);
+        assert!(rates.description().unwrap().contains("Measuring…"));
+        progress.transferred = 2048;
+        rates.sample(&progress, start + Duration::from_secs(2));
+        assert!(
+            rates
+                .description()
+                .unwrap()
+                .contains("Current: 1.0 KiB/s · Average: 1.0 KiB/s")
+        );
+        rates.sample(&progress, start + Duration::from_secs(4));
+        let stalled = rates.description().unwrap();
+        assert!(stalled.contains("Current: 0 B/s · Average: 512 B/s"));
+        rates.finished = true;
+        rates.sample(&progress, start + Duration::from_secs(10));
+        assert!(rates.description().unwrap().contains("Measuring…"));
+        progress.phase = "Receiving";
+        rates.sample(&progress, start + Duration::from_secs(12));
+        assert!(
+            rates
+                .description()
+                .unwrap()
+                .contains("Receiving · Current: Measuring…")
+        );
+        progress.transferred = 0;
+        rates.sample(&progress, start + Duration::from_secs(13));
+        assert!(rates.description().unwrap().contains("Measured: 0s"));
+    }
+
+    #[test]
+    fn details_render_transfer_statistics_and_logs() {
+        let config = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(config.path().into()));
+        app.screen = Screen::Running;
+        app.details = true;
+        app.log("connected".into());
+        let start = Instant::now();
+        let mut progress = Progress {
+            phase: "Sending",
+            current_path: "file".into(),
+            transferred: 0,
+            total: 4096,
+            files_done: 0,
+            files_total: 1,
+        };
+        app.rates.sample(&progress, start);
+        progress.transferred = 2048;
+        app.rates.sample(&progress, start + Duration::from_secs(2));
+        app.progress = Some(progress);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        for screen in [Screen::Running, Screen::Result] {
+            app.screen = screen;
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect();
+            assert!(rendered.contains("Current: 1.0 KiB/s"));
+            assert!(rendered.contains("Average: 1.0 KiB/s"));
+            assert!(rendered.contains("connected"));
+        }
+    }
+
     #[test]
     fn unicode_input_supports_cursor_editing_and_paste() {
         let mut input = Input::new("aéz".into());

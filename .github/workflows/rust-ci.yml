@@ -1,0 +1,176 @@
+# Based on rust-cli-toolkit v2.0.0; kept locally to fix audit job permissions.
+name: Reusable Rust CLI CI
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        required: true
+        type: string
+      display-name:
+        required: true
+        type: string
+      environment-prefix:
+        required: true
+        type: string
+      run-installer-tests:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      dependency_token:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEPENDENCY_TOKEN: ${{ secrets.dependency_token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Authenticate private Cargo dependencies
+        if: env.DEPENDENCY_TOKEN != ''
+        run: git config --global url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          prefix-key: v1-rust
+          shared-key: ci-${{ github.repository_id }}-quality
+          key: ${{ runner.os }}
+          cache-bin: false
+          cache-on-failure: false
+          save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - name: Remove private dependency credential
+        if: always() && env.DEPENDENCY_TOKEN != ''
+        run: git config --global --unset-all url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf || true
+
+  security:
+    name: RustSec audit
+    permissions:
+      contents: read
+      checks: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  native:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      DEPENDENCY_TOKEN: ${{ secrets.dependency_token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Authenticate private Cargo dependencies
+        if: env.DEPENDENCY_TOKEN != ''
+        shell: bash
+        run: git config --global url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          prefix-key: v1-rust
+          shared-key: ci-${{ github.repository_id }}-native
+          key: ${{ runner.os }}
+          cache-bin: false
+          cache-on-failure: false
+          save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - run: cargo test --locked --all-targets
+      - name: Remove private dependency credential
+        if: always() && env.DEPENDENCY_TOKEN != ''
+        shell: bash
+        run: git config --global --unset-all url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf || true
+
+  installers:
+    if: inputs.run-installer-tests
+    name: Installer rendering (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: cdenihan/rust-cli-toolkit/actions/render-installers@v2.0.0
+        with:
+          binary-name: ${{ inputs.binary-name }}
+          display-name: ${{ inputs.display-name }}
+          repository: ${{ github.repository }}
+          environment-prefix: ${{ inputs.environment-prefix }}
+          output-directory: ${{ runner.temp }}/installers
+      - name: Validate POSIX installer
+        if: runner.os != 'Windows'
+        shell: sh
+        run: |
+          sh -n "$RUNNER_TEMP/installers/install.sh"
+          RUST_CLI_TOOLKIT_INSTALLER_SOURCE_ONLY=1
+          export RUST_CLI_TOOLKIT_INSTALLER_SOURCE_ONLY
+          . "$RUNNER_TEMP/installers/install.sh"
+          test "$PROGRAM" = '${{ inputs.binary-name }}'
+          test "$ENV_PREFIX" = '${{ inputs.environment-prefix }}'
+          test "$(artifact_for Linux x86_64 gnu)" = '${{ inputs.binary-name }}-linux-x86_64'
+      - name: Validate PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RENDERED_INSTALLER: ${{ runner.temp }}/installers/install.ps1
+        run: |
+          $sourceOnly = '${{ inputs.environment-prefix }}_INSTALLER_SOURCE_ONLY'
+          [Environment]::SetEnvironmentVariable($sourceOnly, '1')
+          . $env:RENDERED_INSTALLER
+          if ((Get-CliArtifact 'AMD64') -ne '${{ inputs.binary-name }}-windows-x86_64.exe') { throw 'x86_64 artifact mismatch' }
+          if ((Get-CliArtifact 'ARM64') -ne '${{ inputs.binary-name }}-windows-aarch64.exe') { throw 'ARM64 artifact mismatch' }
+
+  cross-check:
+    name: Check ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEPENDENCY_TOKEN: ${{ secrets.dependency_token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Authenticate private Cargo dependencies
+        if: env.DEPENDENCY_TOKEN != ''
+        run: git config --global url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          prefix-key: v1-rust
+          shared-key: ci-${{ github.repository_id }}-cross-check-${{ matrix.target }}
+          cache-bin: false
+          cache-on-failure: false
+          save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - run: cargo check --locked --target ${{ matrix.target }}
+      - name: Remove private dependency credential
+        if: always() && env.DEPENDENCY_TOKEN != ''
+        run: git config --global --unset-all url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf || true
