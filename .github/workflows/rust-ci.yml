@@ -39,7 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-${{ github.repository_id }}-quality
@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: git config --global url."https://x-access-token:${DEPENDENCY_TOKEN}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-${{ github.repository_id }}-native
@@ -163,7 +163,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-${{ github.repository_id }}-cross-check-${{ matrix.target }}
