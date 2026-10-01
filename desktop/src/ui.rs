@@ -843,13 +843,19 @@ impl Desktop {
                     ("local", "Prefer local", ConflictPolicy::PreferLocal),
                     ("remote", "Prefer remote", ConflictPolicy::PreferRemote),
                 ] {
-                    choices = choices.child(self.button(id, label).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.policy = policy;
-                            this.preview_revision = None;
-                            this.start(true, cx);
-                        },
-                    )));
+                    choices = choices.child(
+                        self.button(id, label)
+                            .when(self.policy == policy, |button| {
+                                button
+                                    .bg(self.color(0x213b39))
+                                    .border_color(self.color(0x63e6c9))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.policy = policy;
+                                this.preview_revision = None;
+                                this.start(true, cx);
+                            })),
+                    );
                 }
                 body = body.child(choices);
             }

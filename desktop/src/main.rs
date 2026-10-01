@@ -658,6 +658,8 @@ impl Desktop {
         }
         self.revision = self.revision.wrapping_add(1);
         self.preview_revision = None;
+        self.preview_snapshot = None;
+        self.policy = ConflictPolicy::Preserve;
         cx.notify();
     }
     fn refresh_peers(&self) {
