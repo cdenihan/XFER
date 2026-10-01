@@ -133,7 +133,7 @@ On macOS, install Xcode and its optional Metal Toolchain. If the Metal compiler
 is unavailable, local builds can use `--features runtime-shaders` on the desktop
 package; shaders then compile through Metal at app startup. Release CI uses
 precompiled shaders. On Linux, build with Clang, CMake, pkg-config and development
-packages for ALSA, Fontconfig, FreeType, Wayland, xkbcommon, OpenSSL, and XCB.
+packages for ALSA, Fontconfig, FreeType, Wayland, xkbcommon (including xkbcommon-x11), OpenSSL, and XCB.
 On Windows, use the MSVC toolchain, Visual Studio C++ build tools, and Windows SDK.
 
 All application storage, updater, installer, and release behavior is local to

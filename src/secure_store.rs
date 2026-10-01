@@ -42,7 +42,9 @@ impl SecureDir {
 
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.root)?;
-        set_private_permissions(&self.root)
+        #[cfg(unix)]
+        set_private_permissions(&self.root)?;
+        Ok(())
     }
 
     /// Reads `name`, or `None` if it does not exist.
@@ -101,6 +103,7 @@ impl SecureDir {
         self.ensure()?;
         let path = self.path(name);
         drop(open_lock_file(&path)?);
+        #[cfg(unix)]
         set_private_permissions(&path)?;
         Ok(path)
     }
@@ -141,8 +144,8 @@ fn open_lock_file(path: &Path) -> Result<fs::File> {
     {
         fs::create_dir_all(parent)?;
     }
-    // Never truncate: the lock is the file's existence, not its contents, and
-    // truncating would disturb a holder that keeps state there.
+    // Never truncate: holders may keep state in the lock file. The operating
+    // system lock belongs to the open file handle, not the file's contents.
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -173,6 +176,7 @@ fn write_temp(root: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
     temp.write_all(bytes)?;
     temp.flush()?;
     temp.as_file().sync_all()?;
+    #[cfg(unix)]
     set_private_permissions(temp.path())?;
     Ok(temp)
 }
@@ -182,11 +186,6 @@ fn set_private_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if path.is_dir() { 0o700 } else { 0o600 };
     fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -307,14 +306,16 @@ mod lock_tests {
         assert!(path.is_file());
     }
 
-    /// The lock is the file's existence, so an existing one must survive being
-    /// locked rather than being truncated out from under its holder.
+    /// Acquiring a lock must preserve existing file contents.
     #[test]
     fn a_path_lock_does_not_truncate_an_existing_file() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("build.lock");
         std::fs::write(&path, b"owner=1234").unwrap();
-        let _guard = FileLock::acquire(&path).unwrap();
+        let guard = FileLock::acquire(&path).unwrap();
+        assert_eq!(guard.file.metadata().unwrap().len(), 10);
+        // Windows denies reads through a second handle while the lock is held.
+        drop(guard);
         assert_eq!(std::fs::read(&path).unwrap(), b"owner=1234");
     }
 

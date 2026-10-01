@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod input;
 use gpui::{
     App, Application, Bounds, Context, Div, ElementId, Entity, FocusHandle, Focusable, KeyBinding,
@@ -135,6 +137,7 @@ struct Desktop {
     logs: VecDeque<String>,
     error: Option<String>,
     sas: Option<(String, String)>,
+    receiver_addresses: Option<String>,
     details: bool,
     advanced: bool,
     confirm_clear: bool,
@@ -236,6 +239,7 @@ impl Desktop {
             logs: VecDeque::new(),
             error: None,
             sas: None,
+            receiver_addresses: None,
             details: false,
             advanced: false,
             confirm_clear: false,
@@ -310,7 +314,12 @@ impl Desktop {
             }
             changed = true;
             match envelope.event {
-                WorkerEvent::Status(text) => self.log(text),
+                WorkerEvent::Status(text) => {
+                    if let Some(addresses) = text.strip_prefix("receiver addresses: ") {
+                        self.receiver_addresses = Some(addresses.to_string());
+                    }
+                    self.log(text);
+                }
                 WorkerEvent::Sas(sas, fingerprint) => self.sas = Some((sas, fingerprint)),
                 WorkerEvent::Trust(prompt, reply) => self.trust = Some((prompt, reply)),
                 WorkerEvent::Received(summary) => {
@@ -482,6 +491,7 @@ impl Desktop {
         self.summary = None;
         self.progress = None;
         self.sas = None;
+        self.receiver_addresses = None;
         self.trust = None;
         self.rates = TransferRates::default();
         self.logs.clear();
@@ -1049,6 +1059,28 @@ impl Render for Desktop {
                             "Transfer in progress"
                         }),
                 );
+                body = body.child(div().text_sm().text_color(rgb(0x95a5b8)).child(format!(
+                    "{}: {}",
+                    if self.action == Action::Receive {
+                        "Saving to"
+                    } else {
+                        "Content"
+                    },
+                    self.inputs[0].read(cx).value()
+                )));
+                if self.action == Action::Receive {
+                    if let Some(addresses) = &self.receiver_addresses {
+                        body = body.child(Self::card("Connect from another computer")
+                            .child(addresses.clone())
+                            .child(div().text_sm().text_color(rgb(0x95a5b8)).child("In Send, choose this computer from Nearby receivers or enter one of these addresses.")));
+                    }
+                } else {
+                    body = body.child(div().text_sm().text_color(rgb(0x95a5b8)).child(format!(
+                        "To {}:{}",
+                        self.inputs[1].read(cx).value(),
+                        self.inputs[2].read(cx).value()
+                    )));
+                }
             }
             if let Some((prompt, _)) = &self.trust {
                 body = body.child(

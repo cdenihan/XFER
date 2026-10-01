@@ -167,7 +167,7 @@ jobs:
           components: clippy
       - name: Linux desktop libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev libfreetype6-dev libwayland-dev libxkbcommon-dev libssl-dev libxcb1-dev libclang-dev clang cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev libfreetype6-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libxcb1-dev libclang-dev clang cmake
       - name: Metal compiler
         if: runner.os == 'macOS'
         run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
