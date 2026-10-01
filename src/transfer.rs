@@ -277,6 +277,27 @@ fn receive_inner(
     control.check()?;
     validate_receive_options(options)?;
     let listener = net::bind(&options.bind, options.port)?;
+    receive_bound_inner(&listener, options, reporter, control)
+}
+
+/// Receives one session while retaining a caller-owned listener between sessions.
+pub fn receive_on_listener_controlled(
+    listener: &TcpListener,
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.finish(receive_bound_inner(listener, options, reporter, control))
+}
+
+fn receive_bound_inner(
+    listener: &TcpListener,
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
+    control.check()?;
+    validate_receive_options(options)?;
     let local = listener.local_addr()?;
     let port = local.port();
     match net::listener_endpoints(local.ip(), port) {
@@ -314,7 +335,7 @@ fn receive_inner(
         reporter.status("LAN discovery is off");
         None
     };
-    receive_on_listener_inner(&listener, options, reporter, control, advertiser)
+    receive_on_listener_inner(listener, options, reporter, control, advertiser)
 }
 
 pub fn receive_on_listener(
@@ -453,7 +474,7 @@ fn receive_transfer(
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-fn validate_receive_options(options: &ReceiveOptions) -> Result<()> {
+pub(crate) fn validate_receive_options(options: &ReceiveOptions) -> Result<()> {
     validate_secure_token(options.secure, options.token.as_deref())
 }
 

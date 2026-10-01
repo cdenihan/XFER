@@ -13,14 +13,24 @@ use xfer::{
     workflow::{Action, Job, Recent, WorkerEvent, send_options},
 };
 
+#[track_caller]
 fn wait_for(job: &Job, mut predicate: impl FnMut(WorkerEvent) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(envelope) = job.try_recv() {
             assert_eq!(envelope.operation, job.operation);
+            let terminal = if let WorkerEvent::Finished(result) = &envelope.event {
+                Some(format!("{result:?}"))
+            } else {
+                None
+            };
             if predicate(envelope.event) {
                 return;
             }
+            assert!(
+                terminal.is_none(),
+                "unexpected worker completion: {terminal:?}"
+            );
         }
         assert!(Instant::now() < deadline, "worker event timed out");
         thread::sleep(Duration::from_millis(10));

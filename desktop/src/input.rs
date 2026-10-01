@@ -123,9 +123,10 @@ impl TextInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        window.focus(&self.focus_handle);
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -156,7 +157,11 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            let text = text
+                .replace("\r\n", " ")
+                .replace(['\r', '\n', '\u{2028}', '\u{2029}'], " ");
+            let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -662,6 +667,30 @@ fn utf16_offset(text: &str, offset: usize) -> usize {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn mouse_focus_and_windows_clipboard_text(cx: &mut gpui::TestAppContext) {
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new("path", false, cx));
+        cx.run_until_parked();
+        cx.simulate_mouse_down(
+            point(px(16.), px(16.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_input("résumé");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                assert!(input.focus_handle.is_focused(window));
+                assert_eq!(input.value(), "résumé");
+                input.select_all(&SelectAll, window, cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    "one\r\ntwo\rthree\nfour\0\u{2028}five\u{2029}".into(),
+                ));
+                input.paste(&Paste, window, cx);
+                assert_eq!(input.value(), "one two three four five ");
+                assert!(!input.value().chars().any(char::is_control));
+            });
+        });
+    }
     #[gpui::test]
     fn unicode_replacement_selection_and_ime(cx: &mut gpui::TestAppContext) {
         let (input, cx) = cx.add_window_view(|_, cx| TextInput::new("path", false, cx));

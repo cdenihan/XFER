@@ -130,6 +130,8 @@ struct Desktop {
     revision: u64,
     preview_revision: Option<u64>,
     job: Option<Job>,
+    retiring: Option<Job>,
+    job_revision: Option<u64>,
     trust: Option<(TrustPrompt, SyncSender<bool>)>,
     summary: Option<TransferSummary>,
     progress: Option<Progress>,
@@ -196,7 +198,7 @@ impl Desktop {
             if let Some((_, reply)) = this.trust.take() {
                 let _ = reply.try_send(false);
             }
-            let job = this.job.take();
+            let job = this.job.take().or_else(|| this.retiring.take());
             if let Some(job) = &job {
                 job.control.cancel();
             }
@@ -232,6 +234,8 @@ impl Desktop {
             revision: 0,
             preview_revision: None,
             job: None,
+            retiring: None,
+            job_revision: None,
             trust: None,
             summary: None,
             progress: None,
@@ -266,6 +270,13 @@ impl Desktop {
     }
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
+        if let Some(job) = &self.retiring {
+            while job.try_recv().is_some() {}
+            if job.is_finished() {
+                self.retiring = None;
+                changed = true;
+            }
+        }
         while let Ok(message) = self.messages.try_recv() {
             changed = true;
             match message {
@@ -333,24 +344,7 @@ impl Desktop {
                     self.progress = None;
                     self.rates.finish();
                 }
-                WorkerEvent::Finished(result) => {
-                    self.job = None;
-                    self.trust = None;
-                    match result {
-                        Ok(summary) => {
-                            self.version_notice(&summary);
-                            if summary.preview {
-                                self.preview_revision = Some(self.revision);
-                            }
-                            self.summary = Some(summary);
-                        }
-                        Err(error) => self.error = Some(error.to_string()),
-                    }
-                    if let Some(progress) = &self.progress {
-                        self.rates.sample(progress, Instant::now());
-                    }
-                    self.rates.finish();
-                }
+                WorkerEvent::Finished(result) => self.finish(result),
             }
         }
         if self.job.is_some()
@@ -362,6 +356,30 @@ impl Desktop {
         if changed {
             cx.notify();
         }
+    }
+    fn finish(&mut self, result: xfer::error::Result<TransferSummary>) {
+        self.job = None;
+        self.trust = None;
+        let revision = self.job_revision.take();
+        match result {
+            Ok(summary) => {
+                self.version_notice(&summary);
+                if summary.preview {
+                    self.preview_revision = revision.filter(|revision| *revision == self.revision);
+                    if self.preview_revision.is_none() {
+                        self.error = Some(
+                            "Inputs changed during preview. Preview again before applying.".into(),
+                        );
+                    }
+                }
+                self.summary = Some(summary);
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        if let Some(progress) = &self.progress {
+            self.rates.sample(progress, Instant::now());
+        }
+        self.rates.finish();
     }
     fn version_notice(&mut self, summary: &TransferSummary) {
         if summary.peer_version.as_deref() != Some(xfer::VERSION) {
@@ -378,10 +396,14 @@ impl Desktop {
         }
         if let Some(job) = self.job.take() {
             job.control.cancel();
+            self.retiring = Some(job);
             self.log("Cancelled. Already completed files are retained.".into());
         }
         self.operation = self.operation.wrapping_add(1);
+        self.job_revision = None;
         self.preview_revision = None;
+        self.progress = None;
+        self.sas = None;
         self.rates.finish();
         cx.notify();
     }
@@ -394,7 +416,7 @@ impl Desktop {
         if let Some((_, reply)) = self.trust.take() {
             let _ = reply.try_send(false);
         }
-        let job = self.job.take();
+        let job = self.job.take().or_else(|| self.retiring.take());
         if let Some(job) = &job {
             job.control.cancel();
         }
@@ -418,7 +440,12 @@ impl Desktop {
         self.start(false, cx);
     }
     fn start(&mut self, force_preview: bool, cx: &mut Context<Self>) {
-        if self.closing || !self.ready || self.job.is_some() || self.view != View::Workflow {
+        if self.closing
+            || !self.ready
+            || self.job.is_some()
+            || self.retiring.is_some()
+            || self.view != View::Workflow
+        {
             return;
         }
         let values = self
@@ -426,7 +453,7 @@ impl Desktop {
             .iter()
             .map(|i| i.read(cx).value())
             .collect::<Vec<_>>();
-        let port = match values[2].parse::<u16>() {
+        let port = match values[2].trim().parse::<u16>() {
             Ok(port) if port != 0 => port,
             _ => {
                 self.error = Some("Port must be between 1 and 65535.".into());
@@ -496,13 +523,16 @@ impl Desktop {
         self.rates = TransferRates::default();
         self.logs.clear();
         match Job::start(self.operation, recent, sender, receiver) {
-            Ok(job) => self.job = Some(job),
+            Ok(job) => {
+                self.job_revision = Some(self.revision);
+                self.job = Some(job);
+            }
             Err(error) => self.error = Some(error.to_string()),
         }
         cx.notify();
     }
     fn choose(&mut self, folder: bool, cx: &mut Context<Self>) {
-        if self.job.is_some() {
+        if self.job.is_some() || self.retiring.is_some() {
             return;
         }
         let request = cx.prompt_for_paths(PathPromptOptions {
@@ -564,7 +594,7 @@ impl Desktop {
         window.focus(&self.inputs[visible[next]].focus_handle(cx));
     }
     fn toggle(&mut self, toggle: Toggle, cx: &mut Context<Self>) {
-        if self.job.is_some() {
+        if self.job.is_some() || self.retiring.is_some() {
             return;
         }
         match toggle {
@@ -872,11 +902,12 @@ impl Drop for Desktop {
             let _ = reply.try_send(false);
         }
         self.job.take();
+        self.retiring.take();
     }
 }
 impl Render for Desktop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = self.job.is_some();
+        let running = self.job.is_some() || self.retiring.is_some();
         let mut navigation = div().flex().gap_1().flex_wrap();
         for action in [Action::Copy, Action::Receive, Action::Sync, Action::TwoWay] {
             navigation = navigation.child(
@@ -895,7 +926,7 @@ impl Render for Desktop {
                         .text_color(rgb(0x8ff0d8))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.job.is_none() {
+                    if this.job.is_none() && this.retiring.is_none() {
                         this.action = action;
                         this.view = View::Workflow;
                         this.preview_revision = None;
@@ -907,7 +938,7 @@ impl Render for Desktop {
         }
         navigation = navigation.child(self.button("settings", "Settings").on_click(cx.listener(
             |this, _, _, cx| {
-                if this.job.is_none() {
+                if this.job.is_none() && this.retiring.is_none() {
                     this.view = View::Settings;
                     this.refresh_peers();
                     cx.notify();
@@ -1053,7 +1084,9 @@ impl Render for Desktop {
                         .rounded_lg()
                         .bg(rgb(0x172a2b))
                         .text_color(rgb(0x88e5cf))
-                        .child(if self.action == Action::Receive {
+                        .child(if self.retiring.is_some() {
+                            "Stopping the previous transfer…"
+                        } else if self.action == Action::Receive {
                             "Listening for incoming transfers"
                         } else {
                             "Transfer in progress"
@@ -1204,7 +1237,9 @@ impl Render for Desktop {
                     body = body.child(choices);
                 }
             }
-            let primary = if running {
+            let primary = if self.retiring.is_some() {
+                "Stopping…"
+            } else if running {
                 "Cancel"
             } else if self.action == Action::Receive {
                 "Start receiving"
@@ -1249,7 +1284,11 @@ impl Render for Desktop {
                     ))),
             );
             if running && self.progress.is_none() {
-                body = body.child("Preparing, connecting, or waiting for a sender…");
+                body = body.child(if self.retiring.is_some() {
+                    "Releasing the connection before another transfer can start…"
+                } else {
+                    "Preparing, connecting, or waiting for a sender…"
+                });
             }
             if self.details {
                 body = body
@@ -1473,6 +1512,111 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+    }
+    fn preview_summary() -> TransferSummary {
+        TransferSummary {
+            sync_stats: None,
+            preview: true,
+            conflicts: vec![],
+            destination: PathBuf::from("reviewed-folder"),
+            file_count: 0,
+            total_bytes: 0,
+            peer: "127.0.0.1:9000".parse().unwrap(),
+            peer_version: Some(xfer::VERSION.into()),
+        }
+    }
+    #[gpui::test]
+    fn preview_completion_cannot_approve_changed_inputs(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| Desktop::new(None, cx));
+        view.update(cx, |this, cx| {
+            this.action = Action::Sync;
+            this.job_revision = Some(this.revision);
+            this.inputs[0].update(cx, |input, cx| input.set("different-folder".into(), cx));
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            this.finish(Ok(preview_summary()));
+            assert!(this.preview_revision.is_none());
+            assert!(this.error.as_deref().unwrap().contains("Inputs changed"));
+            this.error = None;
+            this.job_revision = Some(this.revision);
+            this.finish(Ok(preview_summary()));
+            assert_eq!(this.preview_revision, Some(this.revision));
+        });
+    }
+    #[gpui::test]
+    fn cancelled_receiver_blocks_retry_until_worker_exits(cx: &mut gpui::TestAppContext) {
+        let config = std::env::temp_dir().join(format!(
+            "xfer-gpui-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let recent = Recent {
+            action: Action::Receive,
+            path: config.join("received"),
+            port: 0,
+            ..Recent::default()
+        };
+        let receiver = ReceiveOptions {
+            allow_sync: false,
+            sync_into: false,
+            bind: "127.0.0.1".into(),
+            port: 0,
+            output: recent.path.clone(),
+            overwrite: false,
+            discoverable: false,
+            secure: false,
+            token: None,
+            config_dir: Some(config.clone()),
+        };
+        let job = Job::start(
+            7,
+            recent.clone(),
+            workflow::send_options(&recent, Some(config.clone())),
+            receiver,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(event) = job.try_recv() {
+                match event.event {
+                    WorkerEvent::Status(text) if text.starts_with("listening on") => break,
+                    WorkerEvent::Finished(result) => panic!("receiver failed to start: {result:?}"),
+                    _ => {}
+                }
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let (view, cx) = cx.add_window_view(|_, cx| Desktop::new(Some(config.clone()), cx));
+        cx.update(|window, cx| {
+            view.update(cx, move |this, cx| {
+                this.ready = true;
+                this.action = Action::Receive;
+                this.inputs[0].update(cx, |input, cx| {
+                    input.set(recent.path.display().to_string(), cx)
+                });
+                this.operation = 7;
+                this.job = Some(job);
+                this.cancel(&Cancel, window, cx);
+                assert!(this.retiring.is_some());
+                this.start(false, cx);
+                assert!(this.job.is_none());
+                assert_eq!(this.operation, 8);
+            });
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.update(cx, |this, cx| {
+            this.poll(cx);
+            this.retiring.is_some()
+        }) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(config).unwrap();
     }
     #[gpui::test]
     fn escape_rejects_pending_trust(cx: &mut gpui::TestAppContext) {

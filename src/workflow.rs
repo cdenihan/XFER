@@ -7,7 +7,7 @@ use crate::{
     secure_store::{LockedJsonStore, SecureDir},
     transfer::{
         ConflictPolicy, ReceiveOptions, SendOptions, TransferSummary, human_bytes,
-        receive_controlled, send_controlled,
+        receive_on_listener_controlled, send_controlled, validate_receive_options,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -224,10 +224,16 @@ impl Job {
                     reporter.control.check()?;
                     preferences(sender.config_dir.clone())?.save(&recent)?;
                     if recent.action == Action::Receive {
+                        validate_receive_options(&receiver)?;
+                        let listener = crate::net::bind(&receiver.bind, receiver.port)?;
                         loop {
                             reporter.control.check()?;
-                            let summary =
-                                receive_controlled(&receiver, &reporter, &reporter.control)?;
+                            let summary = receive_on_listener_controlled(
+                                &listener,
+                                &receiver,
+                                &reporter,
+                                &reporter.control,
+                            )?;
                             reporter.send(WorkerEvent::Received(summary))?;
                         }
                     } else {

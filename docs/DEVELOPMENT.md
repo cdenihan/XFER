@@ -218,3 +218,8 @@ build script embeds the ICO using the Windows SDK resource compiler. Linux insta
 the PNG into the user icon theme and registers an app-id-matching desktop launcher.
 macOS packages seal the complete bundle with an ad hoc signature for resource
 integrity; Developer ID signing and notarization remain deferred.
+
+A desktop receiver keeps one listener open across sessions. Cancellation drains the
+retiring worker and waits for its exit before allowing a retry, avoiding port races.
+Preview approval uses the job’s captured input revision, so later edits cannot
+authorize an unreviewed destination.

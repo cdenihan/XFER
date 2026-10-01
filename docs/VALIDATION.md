@@ -34,7 +34,7 @@ Delta signature generation now reuses its buffer. Conflict choices use indexed i
 ## Checks and limitations
 
 - CLI configuration: 128 unit tests, 19 CLI integration tests, four process/storage tests, and two desktop-worker interoperability tests pass. The core without CLI features passes 126 unit tests.
-- Desktop: three GPUI tests pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, and rejection of pending changed-identity trust prompts.
+- Desktop: six GPUI tests pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, rejection of pending changed-identity trust prompts, stale preview completion, receiver cleanup before retry, mouse focus, and Windows clipboard line endings.
 - Both configurations pass formatting, Clippy with warnings denied, and release compilation. Local desktop builds use `runtime-shaders`.
 - Desktop workers interoperate with CLI processes in both directions, including encrypted transfers, matching security codes, changed-identity rejection/approval, retries, repeated receive sessions, and cancellation during blocked handshake reads.
 - POSIX installer rollback/checksum fixtures, two installer-rendering tests, one release-version test, and three packaging tests pass. Archive tests validate platform icons, macOS metadata, Windows contents, checksums, and Linux installation with unusual home-directory paths.
