@@ -122,6 +122,8 @@ struct Desktop {
     config: Option<PathBuf>,
     view: View,
     theme: theme::Theme,
+    selected_path: Option<PathBuf>,
+    preview_snapshot: Option<xfer::control::ReviewSnapshot>,
     action: Action,
     inputs: Vec<Entity<TextInput>>,
     focus: FocusHandle,
@@ -182,6 +184,13 @@ impl Desktop {
                 cx.subscribe(input, |this, _, _: &input::ContentChanged, cx| {
                     this.revision = this.revision.wrapping_add(1);
                     this.preview_revision = None;
+                    this.preview_snapshot = None;
+                    this.policy = ConflictPolicy::Preserve;
+                    if this.selected_path.as_ref().is_some_and(|path| {
+                        path.to_string_lossy() != this.inputs[0].read(cx).value()
+                    }) {
+                        this.selected_path = None;
+                    }
                     cx.notify();
                 }),
             );
@@ -226,6 +235,8 @@ impl Desktop {
             config,
             view: View::Workflow,
             theme: theme::Theme::new(cx.window_appearance()),
+            selected_path: None,
+            preview_snapshot: None,
             action: Action::Copy,
             inputs,
             focus: cx.focus_handle(),
@@ -368,6 +379,10 @@ impl Desktop {
         }
     }
     fn finish(&mut self, result: xfer::error::Result<TransferSummary>) {
+        self.preview_snapshot = self
+            .job
+            .as_ref()
+            .and_then(|job| job.control.review_snapshot());
         self.job = None;
         self.trust = None;
         let revision = self.job_revision.take();
@@ -381,10 +396,17 @@ impl Desktop {
                             "Inputs changed during preview. Preview again before applying.".into(),
                         );
                     }
+                } else {
+                    self.preview_revision = None;
+                    self.preview_snapshot = None;
                 }
                 self.summary = Some(summary);
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => {
+                self.preview_revision = None;
+                self.preview_snapshot = None;
+                self.error = Some(error.to_string());
+            }
         }
         if let Some(progress) = &self.progress {
             self.rates.sample(progress, Instant::now());
@@ -478,7 +500,11 @@ impl Desktop {
             cx.notify();
             return;
         }
-        let path = match workflow::expand_path(&values[0]) {
+        let path = match self
+            .selected_path
+            .clone()
+            .map_or_else(|| workflow::expand_path(&values[0]), Ok)
+        {
             Ok(path) => path,
             Err(error) => {
                 self.error = Some(error.to_string());
@@ -500,7 +526,9 @@ impl Desktop {
         };
         let mut sender = workflow::send_options(&recent, self.config.clone());
         sender.preview = self.action.syncing()
-            && (force_preview || self.preview_revision != Some(self.revision));
+            && (force_preview
+                || self.preview_revision != Some(self.revision)
+                || self.preview_snapshot.is_none());
         sender.conflict_policy = self.policy;
         sender.secure = self.secure;
         sender.follow_links = self.follow_links && self.action == Action::Copy;
@@ -532,7 +560,10 @@ impl Desktop {
         self.trust = None;
         self.rates = TransferRates::default();
         self.logs.clear();
-        match Job::start(self.operation, recent, sender, receiver) {
+        let expected = (!sender.preview && self.action.syncing())
+            .then(|| self.preview_snapshot.clone())
+            .flatten();
+        match Job::start_reviewed(self.operation, recent, sender, receiver, expected) {
             Ok(job) => {
                 self.job_revision = Some(self.revision);
                 self.job = Some(job);
@@ -557,8 +588,7 @@ impl Desktop {
                 match result {
                     Ok(Ok(Some(paths))) => {
                         if let Some(path) = paths.first() {
-                            this.inputs[0]
-                                .update(cx, |i, cx| i.set(path.to_string_lossy().into_owned(), cx));
+                            this.select_path(path.clone(), cx);
                         }
                     }
                     Ok(Ok(None)) => {}
@@ -569,6 +599,14 @@ impl Desktop {
             });
         })
         .detach();
+    }
+    fn select_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let display = path.to_string_lossy().into_owned();
+        self.selected_path = Some(path);
+        self.inputs[0].update(cx, |input, cx| input.set(display, cx));
+        self.policy = ConflictPolicy::Preserve;
+        self.preview_revision = None;
+        self.preview_snapshot = None;
     }
     fn answer(&mut self, accepted: bool, cx: &mut Context<Self>) {
         if let Some((_, reply)) = self.trust.take() {
@@ -888,6 +926,30 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+    }
+    #[cfg(unix)]
+    #[gpui::test]
+    fn native_paths_and_workflow_conflict_choices_are_preserved_safely(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/native-\xff".to_vec()));
+        let (view, cx) = cx.add_window_view(|_, cx| Desktop::new(None, cx));
+        view.update(cx, |this, cx| this.select_path(path.clone(), cx));
+        cx.run_until_parked();
+        view.update(cx, |this, cx| {
+            assert_eq!(this.selected_path.as_ref(), Some(&path));
+            this.policy = ConflictPolicy::PreferRemote;
+            this.inputs[1].update(cx, |input, cx| input.set("another-peer".into(), cx));
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, cx| {
+            assert_eq!(this.policy, ConflictPolicy::Preserve);
+            assert_eq!(this.selected_path.as_ref(), Some(&path));
+            this.inputs[0].update(cx, |input, cx| input.set("manually edited path".into(), cx));
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, _| assert!(this.selected_path.is_none()));
     }
     fn preview_summary() -> TransferSummary {
         TransferSummary {

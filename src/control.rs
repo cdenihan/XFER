@@ -1,5 +1,6 @@
 //! Cooperative cancellation for transfer workers, including blocked socket I/O.
 use std::{
+    collections::BTreeMap,
     io,
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{
@@ -11,6 +12,10 @@ use std::{
 };
 
 use crate::error::{Result, XferError};
+
+/// In-memory evidence from a desktop preview; no tokens or protocol changes.
+#[derive(Clone, Default)]
+pub struct ReviewSnapshot(BTreeMap<String, [u8; 32]>);
 
 /// Use one control per transfer. Cancellation is permanent; create a fresh
 /// control for a retry. Source planning checks cancellation between entries. Name resolution must
@@ -24,9 +29,40 @@ pub struct TransferControl {
 struct TransferControlState {
     cancelled: AtomicBool,
     stream: Mutex<Option<TcpStream>>,
+    review: Mutex<Option<(ReviewSnapshot, Option<ReviewSnapshot>)>>,
 }
 
 impl TransferControl {
+    pub(crate) fn track_review(&self, expected: Option<ReviewSnapshot>) {
+        *self.state.review.lock().expect("review mutex") =
+            Some((ReviewSnapshot::default(), expected));
+    }
+    pub fn review_snapshot(&self) -> Option<ReviewSnapshot> {
+        self.state
+            .review
+            .lock()
+            .expect("review mutex")
+            .as_ref()
+            .map(|(seen, _)| seen.clone())
+    }
+    pub(crate) fn reviewing(&self) -> bool {
+        self.state.review.lock().expect("review mutex").is_some()
+    }
+    pub(crate) fn review(&self, key: &str, digest: [u8; 32]) -> Result<()> {
+        if let Some((seen, expected)) = self.state.review.lock().expect("review mutex").as_mut() {
+            if expected
+                .as_ref()
+                .is_some_and(|expected| expected.0.get(key) != Some(&digest))
+            {
+                return Err(XferError::Rejected(
+                    "Folders changed since the preview. Preview again before applying.".into(),
+                ));
+            }
+            seen.0.insert(key.to_string(), digest);
+        }
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.state.cancelled.store(true, Ordering::SeqCst);
         if let Some(stream) = self

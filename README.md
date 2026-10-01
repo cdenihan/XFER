@@ -119,7 +119,8 @@ Completed files remain in place after a cancelled sync, so rerunning reuses them
 The desktop dashboard follows your system’s light or dark appearance. Use the sidebar
 for Home, Transfers, Sync, Trusted Devices, and Settings. Drop one file or folder
 onto the content card, choose a nearby receiver, or enter an address manually.
-Temporary shared tokens stay in memory and are never saved.
+Temporary shared tokens stay in memory and are never saved. Sync apply revalidates
+the preview evidence and requires another preview when affected files change.
 
 On macOS, the native menus provide file/folder selection, clipboard editing,
 Settings (`⌘,`), window controls, and Quit (`⌘Q`). Menu actions and keyboard shortcuts

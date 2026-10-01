@@ -33,8 +33,8 @@ Delta signature generation now reuses its buffer. Conflict choices use indexed i
 
 ## Checks and limitations
 
-- CLI configuration: 132 unit tests, 19 CLI integration tests, four process/storage tests, and two desktop-worker interoperability tests pass. The core without CLI features passes 130 unit tests.
-- Desktop: eight GPUI tests pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, rejection of pending changed-identity trust prompts, stale preview completion, receiver cleanup before retry, mouse focus, Windows clipboard line endings, and preserving preview approval during focus and cursor changes. Native action routing tests cover Settings, About, menu availability, Unicode clipboard copying, and focus cleanup.
+- CLI configuration: 132 unit tests, 19 CLI integration tests, four process/storage tests, and three desktop-worker interoperability tests pass. The core without CLI features passes 130 unit tests.
+- Desktop: nine GPUI tests on Unix and eight on Windows pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, rejection of pending changed-identity trust prompts, stale preview completion, receiver cleanup before retry, mouse focus, Windows clipboard line endings, and preserving preview approval during focus and cursor changes. Native path tests retain Unix filename bytes and reset conflict policy when the workflow changes. Native action routing tests cover Settings, About, menu availability, Unicode clipboard copying, and focus cleanup.
 - Both configurations pass formatting, Clippy with warnings denied, and release compilation. Local desktop builds use `runtime-shaders`.
 - Desktop workers interoperate with CLI processes in both directions, including encrypted transfers, matching security codes, changed-identity rejection/approval, retries, repeated receive sessions, and cancellation during blocked handshake reads.
 - POSIX installer rollback/checksum fixtures, two installer-rendering tests, one release-version test, and three packaging tests pass. Archive tests validate platform icons, macOS metadata, Windows contents, checksums, and Linux installation with unusual home-directory paths.
@@ -46,3 +46,10 @@ Delta signature generation now reuses its buffer. Conflict choices use indexed i
 - Publisher code signing, notarization, and desktop self-update are deferred. macOS bundles receive an ad hoc resource seal, verified locally, so packaged icons remain valid bundle resources.
 - The RustSec audit passes in CI. Local cargo-audit and actionlint installation was skipped at the user’s request; actionlint remains unverified. Basic workflow YAML parsing is checked separately.
 - GPUI 0.2.2 transitively includes block 0.1.6 and proc-macro-error2 2.0.1, which Rust flags for future compatibility. This change does not patch or fork upstream crates.
+
+Desktop sync approvals retain in-memory preview evidence. Apply rechecks the source,
+destination basis signatures, and two-way inventories/baseline before sending affected
+file data. Intervening edits require another preview; completed files remain installed
+if a later check aborts. This leaves protocol v5 and CLI JSON unchanged. Desktop review
+adds a source verification pass; ordinary CLI transfers skip it. Inventory review hashes
+stream directly into SHA-256 without another inventory-sized allocation.

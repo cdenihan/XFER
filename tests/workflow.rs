@@ -247,3 +247,106 @@ fn desktop_sender_compares_codes_rejects_changed_identity_and_can_retry() {
         }
     }
 }
+
+#[test]
+fn reviewed_sync_rejects_changed_files_before_overwriting() {
+    use xfer::transfer::ConflictPolicy;
+    for action in [Action::Sync, Action::TwoWay] {
+        for mutation in ["source", "new-source", "destination", "unchanged"] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            let target = directory.path().join("target");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&target).unwrap();
+            fs::write(source.join("file.txt"), b"previewed source").unwrap();
+            fs::write(target.join("file.txt"), b"previewed destination").unwrap();
+            let port = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let receive_recent = Recent {
+                action: Action::Receive,
+                path: target.clone(),
+                host: "127.0.0.1".into(),
+                port,
+                gitignore: false,
+            };
+            let receive_options = ReceiveOptions {
+                allow_sync: true,
+                sync_into: true,
+                bind: "127.0.0.1".into(),
+                port,
+                output: target.clone(),
+                overwrite: false,
+                discoverable: false,
+                secure: false,
+                token: None,
+                config_dir: Some(directory.path().join("receiver-config")),
+            };
+            let receiver = Job::start(
+                1,
+                receive_recent.clone(),
+                send_options(&receive_recent, receive_options.config_dir.clone()),
+                receive_options.clone(),
+            )
+            .unwrap();
+            listening(&receiver);
+            let recent = Recent {
+                action,
+                path: source.clone(),
+                host: "127.0.0.1".into(),
+                port,
+                gitignore: false,
+            };
+            let mut options = send_options(&recent, Some(directory.path().join("sender-config")));
+            options.secure = false;
+            options.conflict_policy = ConflictPolicy::PreferLocal;
+            let preview =
+                Job::start(2, recent.clone(), options.clone(), receive_options.clone()).unwrap();
+            wait_for(
+                &preview,
+                |event| matches!(event, WorkerEvent::Finished(Ok(summary)) if summary.preview),
+            );
+            let snapshot = preview.control.review_snapshot().unwrap();
+            drop(preview);
+            match mutation {
+                "source" => fs::write(source.join("file.txt"), b"unreviewed source").unwrap(),
+                "new-source" => fs::write(source.join("new.txt"), b"unreviewed new file").unwrap(),
+                "destination" => {
+                    fs::write(target.join("file.txt"), b"intervening destination edit").unwrap();
+                }
+                _ => {}
+            }
+            let expected = fs::read(target.join("file.txt")).unwrap();
+            options.preview = false;
+            let apply =
+                Job::start_reviewed(3, recent, options, receive_options, Some(snapshot)).unwrap();
+            if mutation == "unchanged" {
+                wait_for(
+                    &apply,
+                    |event| matches!(event, WorkerEvent::Finished(Ok(summary)) if !summary.preview),
+                );
+                assert_eq!(
+                    fs::read(source.join("file.txt")).unwrap(),
+                    fs::read(target.join("file.txt")).unwrap()
+                );
+            } else {
+                wait_for(
+                    &apply,
+                    |event| matches!(event, WorkerEvent::Finished(Err(XferError::Rejected(message))) if message.contains("Folders changed")),
+                );
+                assert_eq!(
+                    fs::read(target.join("file.txt")).unwrap(),
+                    expected,
+                    "{action:?}: {mutation}"
+                );
+                assert!(!target.join("new.txt").exists());
+            }
+            receiver.control.cancel();
+            wait_for(&receiver, |event| {
+                matches!(event, WorkerEvent::Finished(Err(XferError::Cancelled)))
+            });
+        }
+    }
+}

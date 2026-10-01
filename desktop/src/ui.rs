@@ -20,6 +20,8 @@ impl Desktop {
             self.action = action;
             self.preview_revision = None;
             self.summary = None;
+            self.policy = ConflictPolicy::Preserve;
+            self.preview_snapshot = None;
         }
         if matches!(view, View::Settings | View::Trusted) {
             self.refresh_peers();
@@ -255,7 +257,7 @@ impl Desktop {
                 if paths.paths().len() != 1 {
                     this.error = Some("Drop one file or folder. To send several files, choose their containing folder.".into());
                 } else if let Some(path) = paths.paths().first() {
-                    this.inputs[0].update(cx, |input, cx| input.set(path.to_string_lossy().into_owned(), cx));
+                    this.select_path(path.clone(), cx);
                     this.error = None;
                 }
                 cx.notify();

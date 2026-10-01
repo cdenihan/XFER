@@ -206,8 +206,21 @@ impl Job {
         sender: SendOptions,
         receiver: ReceiveOptions,
     ) -> Result<Self> {
+        Self::start_reviewed(operation, recent, sender, receiver, None)
+    }
+    /// Starts with the exact filesystem evidence approved in an earlier preview.
+    pub fn start_reviewed(
+        operation: u64,
+        recent: Recent,
+        sender: SendOptions,
+        receiver: ReceiveOptions,
+        expected: Option<crate::control::ReviewSnapshot>,
+    ) -> Result<Self> {
         let (tx, events) = mpsc::sync_channel(64);
         let control = Arc::new(TransferControl::default());
+        if recent.action.syncing() {
+            control.track_review(expected);
+        }
         let progress = Arc::default();
         let reporter = WorkerReporter {
             operation,
@@ -221,7 +234,9 @@ impl Job {
                 // Persistence and path validation happen here, never in a frontend event handler.
                 let result = (|| {
                     reporter.control.check()?;
-                    preferences(sender.config_dir.clone())?.save(&recent)?;
+                    if recent.path.to_str().is_some() {
+                        preferences(sender.config_dir.clone())?.save(&recent)?;
+                    }
                     if recent.action == Action::Receive {
                         validate_receive_options(&receiver)?;
                         let listener = crate::net::bind(&receiver.bind, receiver.port)?;

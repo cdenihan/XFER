@@ -65,6 +65,35 @@ pub(crate) fn send(
     if plan.kind != TransferKind::Directory {
         return Err(XferError::invalid_input("sync requires a directory"));
     }
+    // Desktop apply validates the whole source before any payload is sent.
+    // The ordinary CLI avoids this additional review pass.
+    if control.reviewing() {
+        let mut review = Sha256::new();
+        review.update(plan.root_name.as_bytes());
+        for entry in &plan.entries {
+            control.check()?;
+            let path = path_to_wire(&entry.relative)?;
+            review.update((path.len() as u64).to_le_bytes());
+            review.update(path.as_bytes());
+            review.update(entry.size.to_le_bytes());
+            if entry.kind == EntryKind::File {
+                review.update(hash_file(
+                    &mut open_planned_file(entry, options.follow_links)?,
+                    control,
+                )?);
+            } else {
+                review.update([0; 32]);
+            }
+        }
+        control.review(
+            if expected.is_some() {
+                "two-way push source"
+            } else {
+                "one-way source"
+            },
+            review.finalize().into(),
+        )?;
+    }
     let offer = Offer {
         root_name: plan.root_name.clone(),
         kind: plan.kind,
@@ -132,6 +161,19 @@ pub(crate) fn send(
             blocks.extend(page);
         }
         delta::validate_basis(&basis, &blocks)?;
+        if control.reviewing() {
+            let mut review = Sha256::new();
+            review.update(digest);
+            review.update(basis.size.to_le_bytes());
+            review.update(basis.block_size.to_le_bytes());
+            review.update([u8::from(basis.unchanged)]);
+            for block in &blocks {
+                review.update(block.weak.to_le_bytes());
+                review.update(block.strong);
+                review.update(block.length.to_le_bytes());
+            }
+            control.review(&format!("destination/{path}"), review.finalize().into())?;
+        }
         if basis.unchanged {
             if basis.size != entry.size || basis.count != 0 {
                 return Err(XferError::protocol("invalid unchanged-file response"));

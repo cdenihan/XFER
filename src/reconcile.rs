@@ -237,6 +237,21 @@ pub(crate) fn send(
     let directory = SecureDir::discover("xfer", options.config_dir.clone())?;
     let store = LockedJsonStore::<Baseline>::new(directory, &name);
     let baseline = store.load()?;
+    if control.reviewing() {
+        struct HashWriter(Sha256);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0.update(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut review = HashWriter(Sha256::new());
+        serde_json::to_writer(&mut review, &(&local, &remote, &baseline, &header.root))?;
+        control.review("two-way inventory", review.0.finalize().into())?;
+    }
     let mut choices = choose(&local, &remote, &baseline);
     let local_by_path = local
         .iter()
