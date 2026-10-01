@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rust_cli_toolkit::{LockedJsonStore, SecureDir};
+use crate::secure_store::{LockedJsonStore, SecureDir};
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -17,7 +17,7 @@ const PEERS_FILE: &str = "known_peers.json";
 /// `~/.xfer`, or an explicit override.
 ///
 /// The private-directory, atomic-write, and advisory-lock mechanics live in
-/// `rust_cli_toolkit::SecureDir`; this type is the XFER-specific naming on top
+/// the local secure store; this type is the XFER-specific naming on top
 /// of it.
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -125,7 +125,7 @@ pub struct TrustStore {
 
 impl TrustStore {
     pub fn load(paths: &Paths) -> Result<Self> {
-        Ok(paths.peer_store().load()?)
+        paths.peer_store().load()
     }
 
     pub fn get(&self, endpoint: &str) -> Option<&KnownPeer> {
@@ -169,23 +169,7 @@ impl TrustStore {
     /// Locks the store, applies `operation`, and saves the result. A failing
     /// `operation` leaves the stored peers untouched.
     pub fn update<T>(paths: &Paths, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        // The shared store speaks its own error type, which cannot represent
-        // every `XferError`. The real error is carried out of the closure here
-        // and the returned one is only a signal to abandon the save.
-        let mut failure = None;
-        let outcome = paths.peer_store().update(|store| match operation(store) {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                failure = Some(error);
-                Err(rust_cli_toolkit::Error::Configuration(
-                    "peer store was left unchanged".into(),
-                ))
-            }
-        });
-        match outcome {
-            Ok(value) => Ok(value),
-            Err(error) => Err(failure.unwrap_or_else(|| error.into())),
-        }
+        paths.peer_store().update(operation)
     }
 }
 

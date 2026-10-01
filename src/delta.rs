@@ -94,9 +94,10 @@ pub fn signatures(
     let mut entries = Vec::new();
     let mut hash = Sha256::new();
     let mut bytes = 0_u64;
+    let mut buffer = Vec::with_capacity(block);
     loop {
         control.check()?;
-        let mut buffer = Vec::with_capacity(block);
+        buffer.clear();
         reader.take(block as u64).read_to_end(&mut buffer)?;
         if buffer.is_empty() {
             break;

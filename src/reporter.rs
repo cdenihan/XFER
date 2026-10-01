@@ -1,10 +1,10 @@
+#[cfg(feature = "cli")]
 use std::{
     io::{self, IsTerminal, Write},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use crate::error::{Result, XferError};
@@ -51,12 +51,14 @@ impl Reporter for SilentReporter {
     }
 }
 
+#[cfg(feature = "cli")]
 pub struct CliReporter {
-    progress: Mutex<Option<ProgressBar>>,
+    progress: Mutex<Option<Instant>>,
     accept_new: bool,
     json: bool,
 }
 
+#[cfg(feature = "cli")]
 impl CliReporter {
     pub fn new(accept_new: bool, json: bool) -> Self {
         Self {
@@ -67,8 +69,14 @@ impl CliReporter {
     }
 
     pub fn finish(&self) {
-        if let Some(progress) = self.progress.lock().expect("progress mutex").take() {
-            progress.finish_and_clear();
+        if self
+            .progress
+            .lock()
+            .expect("progress mutex")
+            .take()
+            .is_some()
+        {
+            eprintln!();
         }
     }
 
@@ -81,6 +89,7 @@ impl CliReporter {
     }
 }
 
+#[cfg(feature = "cli")]
 impl Reporter for CliReporter {
     fn status(&self, message: &str) {
         if self.json {
@@ -96,25 +105,30 @@ impl Reporter for CliReporter {
             return;
         }
 
-        let mut guard = self.progress.lock().expect("progress mutex");
-        let progress = guard.get_or_insert_with(|| {
-            let bar = ProgressBar::new(snapshot.total);
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.cyan} {msg} [{bar:32.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} ETA {eta}",
-                )
-                .expect("valid progress template")
-                .progress_chars("=>-"),
-            );
-            bar.enable_steady_tick(Duration::from_millis(100));
-            bar
-        });
-        progress.set_length(snapshot.total);
-        progress.set_position(snapshot.transferred.min(snapshot.total));
-        progress.set_message(format!(
-            "{} {} ({}/{})",
-            snapshot.phase, snapshot.current_path, snapshot.files_done, snapshot.files_total
-        ));
+        if !io::stderr().is_terminal() {
+            return;
+        }
+        let mut last = self.progress.lock().expect("progress mutex");
+        let now = Instant::now();
+        if last.is_some_and(|time| now.duration_since(time) < Duration::from_millis(100)) {
+            return;
+        }
+        *last = Some(now);
+        // A single bounded line avoids terminal queries and background tick threads.
+        let path = crate::protocol::sanitize_peer_text(&snapshot.current_path)
+            .chars()
+            .take(80)
+            .collect::<String>();
+        eprint!(
+            "\r{} {}: {} / {} ({}/{})        ",
+            snapshot.phase,
+            path,
+            crate::transfer::human_bytes(snapshot.transferred),
+            crate::transfer::human_bytes(snapshot.total),
+            snapshot.files_done,
+            snapshot.files_total
+        );
+        let _ = io::stderr().flush();
     }
 
     fn show_sas(&self, sas: &str, fingerprint: &str) {

@@ -4,9 +4,8 @@ XFER is a secure, direct file-transfer tool for Windows, macOS, and Linux. It
 sends a file or directory over a single TCP connection, with no account, cloud
 service, or server deployment.
 
-The CLI is a Rust application with
-[clap](https://github.com/clap-rs/clap) CLI and
-[Ratatui](https://github.com/ratatui/ratatui) terminal interface.
+XFER has a lightweight Rust CLI and a separate [GPUI](https://gpui.rs) desktop app.
+Both use the same secure transfer and sync engine.
 
 ## Highlights
 
@@ -22,7 +21,7 @@ The CLI is a Rust application with
 - Exclusion globs, safe symlink handling, and copy/sync previews
 - One-way and two-way incremental folder sync with explicit conflict handling
 - Optional shared token mixed into key derivation
-- Human progress, newline-delimited JSON events, and a live TUI
+- Human progress, newline-delimited JSON events, and a native desktop interface
 - Peer-management, diagnostics, and shell-completion commands
 - A checksum-verified `xfer update` command that replaces the active installation
 - No-op update checks when the installed release is already current
@@ -65,10 +64,10 @@ On the receiving machine:
 xfer receive --output ~/Downloads
 ```
 
-On the sending machine, open the TUI and choose the discovered receiver:
+On the sending machine, open the desktop app and choose the discovered receiver:
 
 ```console
-xfer tui
+xfer-desktop
 ```
 
 Or send directly to an address:
@@ -84,36 +83,44 @@ requires manual confirmation.
 
 Receivers advertise only while `xfer receive` is waiting. Discovery uses one
 small, link-local multicast announcement rather than probing machines or ports.
-If multicast is unavailable, use the receiver address shown in the TUI or by
+If multicast is unavailable, use the receiver address shown in the desktop app or by
 `xfer ip`.
 
-## Terminal interface
+## Desktop interface
 
-Launch the Ratatui interface with:
+Download the desktop archive for your platform from the
+[latest release](https://github.com/cdenihan/XFER/releases/latest). Desktop and
+CLI artifacts are separate; the CLI installers continue to install `xfer`.
+On macOS, extract `XFER.app` and move it to Applications. On Windows, extract
+and launch `xfer-desktop.exe`. On Linux, extract and run `xfer-desktop`, or run
+`install-desktop.sh` to install the executable and desktop launcher for your user.
+These packages are unsigned; code signing and notarization are not included.
 
-```console
-xfer tui
-```
+Choose Send, Receive, One-way Sync, or Two-way Sync. Select a file or folder,
+choose a nearby receiver or enter its address, review settings, then start.
+Sync first shows a preview; use **Apply reviewed sync** to apply. Changing
+settings invalidates the preview. Two-way conflicts can preserve both versions,
+prefer local, or prefer remote; each policy choice generates a fresh preview.
+Neither sync mode propagates deletions.
 
-Running `xfer` without arguments also opens the interface in a terminal.
-Send and Receive are consecutive items in a vertical list, followed by one-way
-and two-way sync.
-Choose an action, browse to a folder, select a nearby computer (or enter its
-address), and review the operation. Sync always shows a preview before applying.
+Receive keeps listening between sessions. **Allow sync** permits updates and
+reads directly in the selected folder; copied items are saved inside that folder.
+Security is on by default. Compare the code on both computers before approving
+a new peer; a changed identity always requires explicit approval. Shared tokens
+are masked and never saved. Exclusion globs are separated by semicolons.
 
-Use arrows and Enter to navigate, `p` to enter a folder path, and `m` to enter
-an address. Receive mode shows the addresses other computers can use and keeps
-listening after a session. Enable sync access on its review screen to permit
-updates and two-way reads directly in the selected folder (without appending
-the sender’s folder name). After reviewing the preview, press Enter on the
-sending computer to apply; the receiver keeps waiting until you do. Copies
-still save the incoming item inside the selected folder. During a conflict preview, `l` prefers local files,
-`r` prefers remote files, and `s` preserves both versions; each choice refreshes
-the preview before applying. On the sync review screen, `g` toggles Git ignore
-filtering; the choice is remembered when repeating the last workflow. Esc cancels waiting or active work. Completed and
-failed operations can be retried, and the last workflow is remembered without
-saving its shared token. Cancellation during source planning or name resolution
-waits for that operation to return.
+**Details** shows bounded logs and rolling two-second and average payload rates.
+Escape cancels; Enter starts or applies the current workflow; Tab and Shift-Tab
+move between input fields. Cancellation checks run during source planning and
+interrupt active socket I/O. DNS and Git subprocesses must finish before their
+workers stop; the window stays responsive and ignores stale results.
+Completed files remain in place after a cancelled sync, so rerunning reuses them.
+
+Settings manages remembered peers and links to desktop release downloads.
+The desktop reads the same `~/.xfer` identity, peer store, recent workflow, and
+sync history as the CLI. Override it using `--config-dir PATH` or `XFER_CONFIG_DIR`.
+Desktop packages are updated manually; `xfer update` continues to update the CLI.
+Running `xfer` without arguments prints help. The old `xfer tui` command is removed.
 
 ## CLI
 
@@ -162,14 +169,11 @@ xfer send 192.168.1.42 ./project --exclude 'node_modules'
 
 If every original filename must be preserved, create a tar archive and send that
 file, then extract it on a filesystem that supports those names. Exclusions are
-also available in the TUI review screen. The progress view shows both completed
-files and transferred bytes: the file count stays unchanged during a large file,
-and the sender can pause while the receiver drains buffered data. Press `d` for
-current throughput (a rolling two-second rate), average throughput, byte totals,
-and measured elapsed time alongside the logs. Rates measure reported payload
-bytes from the first progress sample, exclude preparation/connection time and
-protocol overhead, and reset for each transfer or phase. Stalls reduce the
-current rate to zero; completed statistics remain available in Details.
+also available in the desktop app. The desktop progress view shows both completed files and transferred bytes.
+The file count stays unchanged during a large file, and throughput excludes
+preparation, connection time, encryption, metadata, and protocol overhead.
+Current rates fall to zero during stalls and reset when the phase changes.
+
 
 ### Receive
 
@@ -362,17 +366,21 @@ both machines. See [SECURITY.md](SECURITY.md) for the threat model and
 ## Build and test
 
 The repository tracks the current stable Rust toolchain. The crate metadata
-records Rust 1.88 as the minimum version accepted by the latest dependency set.
+records Rust 1.89 as the minimum version accepted by the latest dependency set.
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
-cargo build --release --locked
+cargo clippy --locked -p xfer --all-targets --all-features -- -D warnings
+cargo test --locked -p xfer --all-targets
+cargo build --release --locked -p xfer
+cargo build --release --locked -p xfer-desktop
 cargo audit
 ```
 
 The resulting executable is `target/release/xfer` (or `xfer.exe` on Windows).
+The desktop requires Rust 1.98 or newer plus native build tools; see
+[development setup](docs/DEVELOPMENT.md).
+
 Install the optional audit command with `cargo install cargo-audit --locked`.
 
 For contributor architecture, test strategy, and release details, see

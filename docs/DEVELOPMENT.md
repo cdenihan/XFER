@@ -2,7 +2,7 @@
 
 ## Project shape
 
-XFER is one package with a library and a thin binary:
+XFER is a workspace with a core library, a feature-gated CLI, and a separate GPUI desktop package:
 
 | Module | Responsibility |
 | --- | --- |
@@ -21,7 +21,9 @@ XFER is one package with a library and a thin binary:
 | `delta` | Bounded rolling block matching and transfer statistics |
 | `sync` | Incremental file reconstruction, previews, and per-file publication |
 | `reconcile` | Two-way inventories, baseline history, and conflict decisions |
-| `tui` | Guided action, folder, computer, review, preview, and result screens |
+| `workflow` | Frontend-neutral actions, recent preferences, rate calculations, and bounded transfer jobs |
+| `secure_store` | Local private directories, atomic writes, and standard file locks |
+| `desktop` package | GPUI views, native path selection, Unicode text input, discovery, and peer settings |
 
 The receive state machine has four states: between entries, receiving a file,
 verified, and failed. An invalid frame poisons it; only a verified machine can
@@ -30,22 +32,25 @@ files until publication, and drop order closes active files before deleting
 staging, including on Windows. Tests can drive the state machine directly
 without a socket. Network integration tests live in `src/transfer/tests.rs`.
 
-The CLI and TUI call the same `transfer` APIs. Network and filesystem behavior
+The CLI and desktop call the same `transfer` APIs. Network and filesystem behavior
 must not be reimplemented in a presentation layer.
 
 ## Toolchain
 
 `rust-toolchain.toml` tracks the current stable Rust toolchain. The crate metadata
-records Rust 1.88 as the minimum accepted by the current dependency set.
+records Rust 1.89 as the minimum accepted by the current dependency set.
 Dependencies are locked in `Cargo.lock`, including for release builds.
 
 Run the full local gate:
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
-cargo build --release --locked
+cargo clippy --locked -p xfer --all-targets --all-features -- -D warnings
+cargo clippy --locked -p xfer-desktop --all-targets -- -D warnings
+cargo test --locked -p xfer --all-targets
+cargo test --locked -p xfer-desktop --features test-support
+cargo build --release --locked -p xfer
+cargo build --release --locked -p xfer-desktop
 cargo audit
 ```
 
@@ -63,7 +68,7 @@ Unit tests cover:
 - protocol record bounds, flags, sequence ordering, and negotiation rejection;
 - discovery validation, version filtering, address selection, and name limits;
 - exclusions, path traversal, portability, symlink escape, and collision naming;
-- TUI navigation, consecutive Send/Receive list items, input editing, and constrained layouts;
+- GPUI workflow views, preview invalidation, Unicode/IME input, and constrained layouts;
 - rolling block reuse after insertions/deletions and literal boundaries;
 - clap command validity and value bounds.
 
@@ -113,25 +118,46 @@ Prefer a new typed frame or a versioned structured field. Keep these invariants:
 
 A breaking wire change increments `protocol::VERSION` and the record version.
 
-## Shared distribution infrastructure
+## Dependencies and desktop build setup
 
-XFER consumes `cdenihan/rust-cli-toolkit` at an immutable tag for its self-update
-runtime, installer generation, cross-platform CI, and release jobs. The local
-workflow files are intentionally thin callers; XFER-specific commands and
-transfer behavior remain in this repository.
+The default workspace member is the CLI package. `cargo build -p xfer` never
+compiles GPUI; `xfer-desktop` depends on the core with default features disabled,
+so it does not pull in Clap. GPUI is pinned to 0.2.2 with font support, Linux
+X11/Wayland, and Windows manifest features enabled explicitly. Its large
+transitive dependency tree is isolated from CLI artifacts. Crypto, JSON, Unicode
+normalization, path traversal, globbing, and safe platform support remain proven
+library dependencies. Application code forbids unsafe Rust.
 
-The toolkit is public, so normal Cargo, GitHub Actions, and Dependabot access
-does not require credentials. The workflow callers still pass the optional
-`RUST_CLI_TOOLKIT_TOKEN` Actions secret as `dependency_token`. A private fork,
-or a consumer with private Git dependencies, can provide a fine-grained token
-with read-only Contents access under that name. Public consumers can leave the
-secret unset. If Dependabot also needs private Git access, configure the same
-name as a Dependabot secret and add a matching `git` registry entry to
-`.github/dependabot.yml`.
+The desktop records Rust 1.98 as its supported minimum and is verified on 1.98.1.
+On macOS, install Xcode and its optional Metal Toolchain. If the Metal compiler
+is unavailable, local builds can use `--features runtime-shaders` on the desktop
+package; shaders then compile through Metal at app startup. Release CI uses
+precompiled shaders. On Linux, build with Clang, CMake, pkg-config and development
+packages for ALSA, Fontconfig, FreeType, Wayland, xkbcommon, OpenSSL, and XCB.
+On Windows, use the MSVC toolchain, Visual Studio C++ build tools, and Windows SDK.
 
-The toolkit dependency and reusable workflow references must move together.
-Dependabot monitors Cargo and GitHub Actions separately, so review both update
-pull requests as one toolkit release before merging.
+All application storage, updater, installer, and release behavior is local to
+XFER. `THIRD_PARTY_NOTICES.md` records the MIT source of adapted infrastructure
+and the Apache license of the GPUI input example. No shared toolkit Actions,
+Cargo Git dependency, or private dependency token is required.
+
+`build_plan_controlled` is the cancellable planning API. Existing planning
+functions remain wrappers for callers without a cancellation handle. GUI jobs
+carry operation identifiers, bound reliable events to 64 entries, and coalesce
+progress outside the queue. Dropping a job cancels its socket and disconnects
+pending events; trust waits observe cancellation. Source traversal checks the
+control between entries, while DNS resolution and Git subprocesses remain
+blocking only on worker threads. Discovery updates are bounded; desktop peer
+lists are capped at 256 and logs at 256 entries. Virtual lists avoid rendering
+whole inventories. Progress redraws run at most 10 Hz; idle polls do not redraw.
+
+Measure release performance with `python3 scripts/benchmark.py target/release/xfer
+--output /tmp/xfer-performance.json`. The harness uses isolated insecure loopback
+sessions to compare payload transport and filesystem work, not authenticated
+crypto throughput. It reports wall time, child CPU time, process startup, binary
+size, and the cumulative peak child RSS (bytes on macOS, KiB on Linux). Resource
+accounting requires Unix. Baseline results and validation limitations are in
+`docs/VALIDATION.md`.
 
 ## CI and releases
 
@@ -148,7 +174,7 @@ day are numbered `.1`, `.2`, `.3`, and so on. The workflow reserves the tag
 atomically before building to avoid duplicate numbers from concurrent pushes,
 and removes its unused reservation if the release fails.
 
-The shared prepare workflow updates three version sources and creates a
+The local prepare workflow updates three version sources and creates a
 `github-actions[bot]` commit on `main` before building:
 
 - `VERSION` keeps the exact public form, such as `2026.07.16.7`;
@@ -172,6 +198,23 @@ Each release builds raw binaries and SHA-256 files for:
 - macOS x86_64 and Apple Silicon;
 - Windows x86_64 and ARM64.
 
-Release builds use `--locked`. The shared publish workflow renders XFER-branded
+Release builds use `--locked`. The local publish workflow renders XFER-branded
 `install.sh` and `install.ps1`, publishes checksums for both scripts, and adds a
 `VERSION` asset used to make already-current update checks a no-op.
+
+Desktop CI compiles and tests natively on Linux, macOS, and Windows. Linux musl
+and other cross-target CLI checks remain separate. Desktop release builds cover
+x86_64 and ARM64 on each platform, with Linux GNU runners. `scripts/package-desktop.py`
+creates app archives and checksums using the Python standard library. The CLI
+installer tests run against disposable local release fixtures and preserve
+rollback behavior. Desktop signing, notarization, and automatic updates are deferred.
+
+## Desktop visual assets
+
+The original exchange-arrow icon lives in `desktop/assets`: SVG source, PNG,
+macOS ICNS, and Windows ICO. Regenerate these with `python3 scripts/generate-icons.py`;
+no graphics or Cargo dependency is required. The UI embeds the PNG. The Windows
+build script embeds the ICO using the Windows SDK resource compiler. Linux installs
+the PNG into the user icon theme and registers an app-id-matching desktop launcher.
+macOS packages seal the complete bundle with an ad hoc signature for resource
+integrity; Developer ID signing and notarization remain deferred.

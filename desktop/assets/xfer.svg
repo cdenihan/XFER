@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <title>XFER — direct exchange</title>
+  <defs><linearGradient id="tile" x2="1" y2="1"><stop stop-color="#1e2e3f"/><stop offset="1" stop-color="#0f1620"/></linearGradient></defs>
+  <rect x="40" y="40" width="920" height="920" rx="200" fill="url(#tile)"/>
+  <polygon points="235,290 625,290 625,195 805,375 625,555 625,460 235,460" fill="#63e6c9"/>
+  <polygon points="765,710 375,710 375,805 195,625 375,445 375,540 765,540" fill="#8eb8ff"/>
+</svg>

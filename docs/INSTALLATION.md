@@ -120,3 +120,21 @@ Run these checks afterward:
 xfer --version
 xfer doctor
 ```
+
+## Desktop application
+
+Desktop archives are separate from the CLI binaries and installers. Download
+`xfer-desktop-macos-{x86_64,aarch64}.tar.gz`,
+`xfer-desktop-windows-{x86_64,aarch64}.zip`, or
+`xfer-desktop-linux-{x86_64,aarch64}.tar.gz` from the same release.
+Verify the adjacent SHA-256 file before extracting. Linux desktop builds use GNU
+libc and require a working X11 or Wayland session and GPU drivers. CLI musl
+artifacts remain available for headless machines.
+
+Move `XFER.app` to Applications on macOS. On Windows, launch `xfer-desktop.exe`
+from its extracted directory. On Linux, launch the extracted binary directly;
+`install-desktop.sh` installs it in `~/.local/bin` and registers a per-user desktop
+launcher. The Linux launcher installer requires Python 3 for correct path quoting.
+Desktop packages do not have publisher signatures or notarization and are updated
+by downloading a new archive. macOS bundles have an ad hoc resource seal.
+`xfer update` only updates the CLI installation.

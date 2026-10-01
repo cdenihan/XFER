@@ -166,6 +166,24 @@ pub fn build_plan_with_gitignore(
     follow_links: bool,
     gitignore: bool,
 ) -> Result<TransferPlan> {
+    build_plan_controlled(
+        input,
+        excludes,
+        follow_links,
+        gitignore,
+        &crate::control::TransferControl::default(),
+    )
+}
+
+pub fn build_plan_controlled(
+    input: &Path,
+    excludes: &[String],
+    follow_links: bool,
+    gitignore: bool,
+    control: &crate::control::TransferControl,
+) -> Result<TransferPlan> {
+    control.check()?;
+
     let metadata = fs::symlink_metadata(input).map_err(|error| {
         XferError::invalid_input(format!("cannot inspect {}: {error}", input.display()))
     })?;
@@ -220,6 +238,7 @@ pub fn build_plan_with_gitignore(
     } else {
         None
     };
+    control.check()?;
     let mut entries = Vec::new();
     let mut total_bytes = 0_u64;
     let mut file_count = 0_u64;
@@ -251,6 +270,7 @@ pub fn build_plan_with_gitignore(
         });
 
     for result in walker.skip(1) {
+        control.check()?;
         let entry = result.map_err(|error| {
             XferError::invalid_input(format!("could not walk {}: {error}", input.display()))
         })?;
@@ -597,6 +617,16 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn cancelled_source_planning_stops_before_scanning() {
+        let control = crate::control::TransferControl::default();
+        control.cancel();
+        assert!(matches!(
+            build_plan_controlled(Path::new("missing"), &[], false, false, &control),
+            Err(XferError::Cancelled)
+        ));
+    }
 
     #[test]
     fn rejects_path_traversal() {

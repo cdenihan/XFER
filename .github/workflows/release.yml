@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   prepare:
-    uses: cdenihan/rust-cli-toolkit/.github/workflows/prepare-release.yml@v2.0.0
+    uses: ./.github/workflows/prepare-release.yml
     with:
       binary-name: xfer
       display-name: XFER
@@ -23,5 +23,3 @@ jobs:
       version-mode: calendar
       version-file: VERSION
       publish-workflow: publish-release.yml
-    secrets:
-      dependency_token: ${{ secrets.RUST_CLI_TOOLKIT_TOKEN }}

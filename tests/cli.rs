@@ -1,3 +1,4 @@
+#![cfg(feature = "cli")]
 use std::{
     fs::{self, File},
     net::TcpListener,
@@ -6,23 +7,23 @@ use std::{
     time::Duration,
 };
 
-use assert_cmd::Command;
-use predicates::prelude::*;
+mod support;
+use support::{Command, contains, equals};
 use tempfile::tempdir;
 
 #[test]
 fn help_lists_primary_workflows() {
-    let mut command = Command::cargo_bin("xfer").unwrap();
+    let mut command = Command::cargo_bin("xfer");
     command
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("send"))
-        .stdout(predicate::str::contains("sync"))
-        .stdout(predicate::str::contains("receive"))
-        .stdout(predicate::str::contains("discover"))
-        .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("tui"));
+        .stdout(contains("send"))
+        .stdout(contains("sync"))
+        .stdout(contains("receive"))
+        .stdout(contains("discover"))
+        .stdout(contains("update"))
+        .stdout(contains("send"));
 }
 
 #[test]
@@ -31,25 +32,25 @@ fn dry_run_reports_a_transfer_without_connecting() {
     let file = directory.path().join("payload.txt");
     std::fs::write(&file, b"payload").unwrap();
 
-    let mut command = Command::cargo_bin("xfer").unwrap();
+    let mut command = Command::cargo_bin("xfer");
     command
         .args(["send", "example.invalid"])
         .arg(&file)
         .arg("--dry-run")
         .assert()
         .success()
-        .stdout(predicate::str::contains("payload.txt"))
-        .stdout(predicate::str::contains("7 B"));
+        .stdout(contains("payload.txt"))
+        .stdout(contains("7 B"));
 }
 
 #[test]
 fn version_matches_compiled_release_version() {
-    let mut command = Command::cargo_bin("xfer").unwrap();
+    let mut command = Command::cargo_bin("xfer");
     command
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::eq(format!("xfer {}\n", xfer::VERSION)));
+        .stdout(equals(format!("xfer {}\n", xfer::VERSION)));
 }
 
 #[test]
@@ -59,7 +60,6 @@ fn dry_run_json_has_stable_machine_readable_fields() {
     fs::write(&file, b"payload").unwrap();
 
     let output = Command::cargo_bin("xfer")
-        .unwrap()
         .args(["--json", "send", "example.invalid"])
         .arg(&file)
         .arg("--dry-run")
@@ -81,42 +81,40 @@ fn dry_run_rejects_invalid_exclude_glob() {
     fs::create_dir(&source).unwrap();
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["send", "example.invalid"])
         .arg(&source)
         .args(["--dry-run", "--exclude", "["])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid exclude pattern"));
+        .stderr(contains("invalid exclude pattern"));
 }
 
 #[test]
 fn receive_help_documents_discovery_opt_out() {
-    let mut command = Command::cargo_bin("xfer").unwrap();
+    let mut command = Command::cargo_bin("xfer");
     command
         .args(["receive", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--no-discovery"))
-        .stdout(predicate::str::contains("local network"));
+        .stdout(contains("--no-discovery"))
+        .stdout(contains("local network"));
 }
 
 #[test]
 fn update_help_documents_release_pinning() {
-    let mut command = Command::cargo_bin("xfer").unwrap();
+    let mut command = Command::cargo_bin("xfer");
     command
         .args(["update", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--version"))
-        .stdout(predicate::str::contains("2026.07.16.2"));
+        .stdout(contains("--version"))
+        .stdout(contains("2026.07.16.2"));
 }
 
 #[test]
 fn doctor_json_reports_identity_network_and_discovery() {
     let directory = tempdir().unwrap();
     let output = Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--json",
             "--config-dir",
@@ -143,7 +141,6 @@ fn doctor_json_reports_identity_network_and_discovery() {
 #[test]
 fn ip_json_is_a_valid_array() {
     let output = Command::cargo_bin("xfer")
-        .unwrap()
         .args(["--json", "ip"])
         .output()
         .unwrap();
@@ -155,18 +152,16 @@ fn ip_json_is_a_valid_array() {
 #[test]
 fn discover_timeout_is_bounded() {
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["discover", "--timeout", "0"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("1..=60"));
+        .stderr(contains("1..=60"));
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["discover", "--timeout", "61"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("1..=60"));
+        .stderr(contains("1..=60"));
 }
 
 #[test]
@@ -187,7 +182,6 @@ fn peer_mutations_emit_json_in_json_mode() {
     .unwrap();
 
     let forget = Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--json",
             "--config-dir",
@@ -204,7 +198,6 @@ fn peer_mutations_emit_json_in_json_mode() {
     assert_eq!(forget_json["endpoint"], "receiver:9000");
 
     let clear = Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--json",
             "--config-dir",
@@ -238,7 +231,6 @@ fn peer_list_and_failure_paths_are_explicit() {
     .unwrap();
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--config-dir",
             directory.path().to_str().unwrap(),
@@ -247,11 +239,10 @@ fn peer_list_and_failure_paths_are_explicit() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("receiver:9000"))
-        .stdout(predicate::str::contains("abcd"));
+        .stdout(contains("receiver:9000"))
+        .stdout(contains("abcd"));
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--config-dir",
             directory.path().to_str().unwrap(),
@@ -261,10 +252,9 @@ fn peer_list_and_failure_paths_are_explicit() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no remembered peer"));
+        .stderr(contains("no remembered peer"));
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args([
             "--config-dir",
             directory.path().to_str().unwrap(),
@@ -273,7 +263,7 @@ fn peer_list_and_failure_paths_are_explicit() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--yes"));
+        .stderr(contains("--yes"));
 }
 
 #[test]
@@ -283,34 +273,27 @@ fn insecure_mode_rejects_shared_tokens_before_network_use() {
     fs::write(&file, b"payload").unwrap();
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["send", "127.0.0.1"])
         .arg(&file)
         .args(["--insecure", "--token", "secret"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--token can only be used with secure transfers",
-        ));
+        .stderr(contains("--token can only be used with secure transfers"));
 
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["receive", "--insecure", "--token", "secret"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--token can only be used with secure transfers",
-        ));
+        .stderr(contains("--token can only be used with secure transfers"));
 }
 
 #[test]
 fn completion_generation_produces_shell_source() {
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["completions", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("_xfer"));
+        .stdout(contains("_xfer"));
 }
 
 #[cfg(not(windows))]
@@ -326,7 +309,7 @@ fn update_skips_replacement_when_latest_is_already_installed() {
     fs::create_dir(&install_directory).unwrap();
     fs::write(download.join("VERSION"), format!("{}\n", xfer::VERSION)).unwrap();
 
-    let source_binary = std::path::PathBuf::from(Command::cargo_bin("xfer").unwrap().get_program());
+    let source_binary = std::path::PathBuf::from(Command::cargo_bin("xfer").get_program());
     let installed_binary = install_directory.join("xfer");
     fs::copy(&source_binary, &installed_binary).unwrap();
     fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o755)).unwrap();
@@ -372,10 +355,7 @@ fn cli_insecure_transfer_round_trips_between_processes() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let binary = Command::cargo_bin("xfer")
-        .unwrap()
-        .get_program()
-        .to_os_string();
+    let binary = Command::cargo_bin("xfer").get_program().to_os_string();
     let mut receiver = ProcessCommand::new(&binary)
         .args(["--config-dir"])
         .arg(&receiver_config)
@@ -450,7 +430,6 @@ fn dry_run_can_send_current_and_parent_directories() {
     fs::write(root.join("hello"), b"hello").unwrap();
     for (cwd, input) in [(&root, "."), (&root.join("nested"), "..")] {
         let output = Command::cargo_bin("xfer")
-            .unwrap()
             .current_dir(cwd)
             .args(["--json", "send", "example.invalid", input, "--dry-run"])
             .output()
@@ -474,7 +453,6 @@ fn dry_run_validates_security_options_and_timeout() {
         vec!["--connect-timeout", "0"],
     ] {
         Command::cargo_bin("xfer")
-            .unwrap()
             .args(["send", "example.invalid", ".", "--dry-run"])
             .args(args)
             .assert()
@@ -488,18 +466,16 @@ fn sync_rejects_file_before_connecting_and_exposes_conflict_choices() {
     let file = directory.path().join("file.txt");
     fs::write(&file, b"data").unwrap();
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["sync", "example.invalid"])
         .arg(&file)
         .arg("--dry-run")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("sync requires a directory"));
+        .stderr(contains("sync requires a directory"));
     Command::cargo_bin("xfer")
-        .unwrap()
         .args(["sync", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--two-way"))
-        .stdout(predicate::str::contains("prefer-local"));
+        .stdout(contains("--two-way"))
+        .stdout(contains("prefer-local"));
 }

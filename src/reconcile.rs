@@ -1,20 +1,19 @@
 //! Two-way reconciliation against the previous successful common file hashes.
 //! Deletions are intentionally not propagated. Conflicting edits stay on both
 //! machines and are reported for an explicit user resolution.
+use crate::secure_store::{LockedJsonStore, SecureDir};
 use crate::{
     control::TransferControl,
     delta::SyncStats,
     error::{Result, XferError},
     filesystem::{
-        TransferPlan, build_plan_with_gitignore, open_planned_file, path_to_wire,
-        safe_relative_path,
+        TransferPlan, build_plan_controlled, open_planned_file, path_to_wire, safe_relative_path,
     },
     protocol::{EntryKind, FrameKind, Offer, RecordStream, TransferKind},
     receiver::{PathRegistry, validate_offer},
     reporter::Reporter,
     transfer::{ReceiveOptions, SendOptions, TransferSummary},
 };
-use rust_cli_toolkit::{LockedJsonStore, SecureDir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -232,19 +231,30 @@ pub(crate) fn send(
         source.display(),
         header.root
     );
-    let name = format!("sync-{}.json", hex::encode(Sha256::digest(key.as_bytes())));
+    let name = format!(
+        "sync-{}.json",
+        crate::encoding::hex(Sha256::digest(key.as_bytes()))
+    );
     let directory = SecureDir::discover("xfer", options.config_dir.clone())?;
     let store = LockedJsonStore::<Baseline>::new(directory, &name);
     let baseline = store.load()?;
     let mut choices = choose(&local, &remote, &baseline);
+    let local_by_path = local
+        .iter()
+        .map(|item| (&item.path, item))
+        .collect::<std::collections::HashMap<_, _>>();
+    let remote_by_path = remote
+        .iter()
+        .map(|item| (&item.path, item))
+        .collect::<std::collections::HashMap<_, _>>();
     if options.conflict_policy != crate::transfer::ConflictPolicy::Preserve {
         choices.conflicts.retain(|path| {
-            let local_file = local
-                .iter()
-                .find(|item| &item.path == path && item.kind == EntryKind::File);
-            let remote_file = remote
-                .iter()
-                .find(|item| &item.path == path && item.kind == EntryKind::File);
+            let local_file = local_by_path
+                .get(path)
+                .filter(|item| item.kind == EntryKind::File);
+            let remote_file = remote_by_path
+                .get(path)
+                .filter(|item| item.kind == EntryKind::File);
             if local_file.is_some() && remote_file.is_some() {
                 if options.conflict_policy == crate::transfer::ConflictPolicy::PreferLocal {
                     choices.push.insert(path.clone());
@@ -331,7 +341,7 @@ pub(crate) fn send(
         }
         store.update(|current| {
             if *current != baseline {
-                return Err(rust_cli_toolkit::Error::Configuration(
+                return Err(XferError::Configuration(
                     "another two-way sync changed the baseline; retry".into(),
                 ));
             }
@@ -383,7 +393,7 @@ pub(crate) fn receive(
     let root = crate::sync::destination(options, &offer.root_name)?;
     crate::sync::checked_target(&root, Path::new(""))?;
     let mut plan = if root.exists() {
-        build_plan_with_gitignore(&root, &request.excludes, false, request.gitignore)?
+        build_plan_controlled(&root, &request.excludes, false, request.gitignore, control)?
     } else {
         TransferPlan {
             root_name: offer.root_name.clone(),

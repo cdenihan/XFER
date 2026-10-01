@@ -23,5 +23,3 @@ jobs:
       binary-name: xfer
       display-name: XFER
       environment-prefix: XFER
-    secrets:
-      dependency_token: ${{ secrets.RUST_CLI_TOOLKIT_TOKEN }}

@@ -2,35 +2,28 @@
 name = "xfer"
 version = "2026.9.6-1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Secure, cross-platform file and directory transfer for local networks"
 repository = "https://github.com/cdenihan/XFER"
 readme = "README.md"
-keywords = ["file-transfer", "lan", "encryption", "cli", "tui"]
+keywords = ["file-transfer", "lan", "encryption", "cli", "gui"]
 categories = ["command-line-utilities", "network-programming"]
 publish = false
 
 [dependencies]
-anyhow = "1.0"
 chacha20poly1305 = "0.11"
-clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
-clap_complete = "4.6"
-crossterm = "0.29"
+clap = { optional = true, version = "4.6", features = ["derive", "env", "wrap_help"] }
+clap_complete = { version = "4.6", optional = true }
 dirs = "6.0"
 globset = "0.4"
 getrandom = "0.4"
-hex = "0.4"
 hkdf = "0.13"
 if-addrs = "0.15"
-indicatif = "0.18"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
-rust-cli-toolkit = { git = "https://github.com/cdenihan/rust-cli-toolkit", tag = "v2.0.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 socket2 = { version = "0.6", features = ["all"] }
 tempfile = "3.27"
-thiserror = "2.0"
 unicode-normalization = "0.1"
 walkdir = "2.5"
 x25519-dalek = { version = "3.0", features = ["static_secrets"] }
@@ -38,13 +31,6 @@ zeroize = "1.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-assert_cmd = "2.2"
-predicates = "3.1"
-
-[build-dependencies]
-rust-cli-toolkit = { git = "https://github.com/cdenihan/rust-cli-toolkit", tag = "v2.0.0" }
 
 [profile.release]
 lto = "thin"
@@ -64,3 +50,17 @@ must_use_candidate = "allow"
 needless_pass_by_value = "allow"
 too_many_lines = "allow"
 trivially_copy_pass_by_ref = "allow"
+
+[workspace]
+members = ["desktop"]
+default-members = ["."]
+resolver = "2"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:clap_complete"]
+
+[[bin]]
+name = "xfer"
+path = "src/main.rs"
+required-features = ["cli"]

@@ -9,18 +9,24 @@ All notable changes to XFER are documented here.
 - Allow manual approval of changed receiver identities while still rejecting
   concurrent conflicting changes to the peer store.
 - Support sending `.` and `..`, and validate exclusion globs for file inputs.
-- Cancel waiting and active TUI transfers and return to the form for retries.
+- Cancel planning, waiting, and active desktop transfers and allow retries.
 - Stop LAN advertisements once the receiver accepts a connection.
 - Reject excess byte/file totals before reading file data and reject ambiguous
   wire paths, including case-colliding ancestor directories.
 - Preserve destination naming and overwrite behavior around dangling symlinks.
 - Detect source files growing or shrinking while sending.
-- Validate dry-run security options, zero connection timeouts, and TUI ports.
+- Validate dry-run security options, zero connection timeouts, and desktop ports.
 
 ### Changed
 
-- Redesigned the TUI around action, folder, computer, review, and result screens;
-  Send and Receive are consecutive items in a vertical list. Added preview/apply sync and conflict choices.
+- Replaced the TUI with a separate GPUI desktop application for Send, Receive,
+  one-way and two-way sync, previews, conflicts, and shared peer settings.
+- Removed the shared toolkit and terminal UI dependencies. Configuration locks,
+  updater, installer generation, and release workflows now live in this repository.
+- Isolated CLI features from desktop builds and added native desktop archives.
+- Added original platform icons and a desktop layout with guided workflow cards,
+  optional advanced controls, clear focus states, and peer management.
+- Reused delta signature buffers and indexed conflict inventories.
 - Incremented the wire protocol to v5; both endpoints require the new build.
 
 - Replaced the nested receiving loop with a state machine that separates frame

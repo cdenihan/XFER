@@ -13,8 +13,8 @@ use std::{
 use crate::error::{Result, XferError};
 
 /// Use one control per transfer. Cancellation is permanent; create a fresh
-/// control for a retry. Name resolution and source planning finish before
-/// cancellation can be observed; attached network I/O is interrupted immediately.
+/// control for a retry. Source planning checks cancellation between entries. Name resolution must
+/// return before cancellation can be observed; attached network I/O is interrupted immediately.
 #[derive(Default)]
 pub struct TransferControl {
     cancelled: AtomicBool,

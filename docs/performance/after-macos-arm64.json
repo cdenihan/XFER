@@ -1,0 +1,41 @@
+{
+  "binary_bytes": 2661680,
+  "workloads": {
+    "large_file": {
+      "seconds": 0.184096667,
+      "payload_bytes": 134217728,
+      "bytes_per_second": 729061151.3352385,
+      "child_cpu_seconds": 0.15808999999999998,
+      "max_child_rss": 4423680
+    },
+    "small_files": {
+      "seconds": 9.120322,
+      "payload_bytes": 1400000,
+      "bytes_per_second": 153503.35218427595,
+      "child_cpu_seconds": 1.5134359999999998,
+      "max_child_rss": 5341184
+    },
+    "initial_sync": {
+      "seconds": 9.591158042,
+      "payload_bytes": 135617728,
+      "bytes_per_second": 14139870.014249109,
+      "child_cpu_seconds": 2.0340249999999997,
+      "max_child_rss": 7487488
+    },
+    "unchanged_sync": {
+      "seconds": 0.5623616670000011,
+      "payload_bytes": 0,
+      "bytes_per_second": 0.0,
+      "child_cpu_seconds": 0.5379370000000003,
+      "max_child_rss": 7487488
+    },
+    "shifted_sync": {
+      "seconds": 0.7802405830000012,
+      "payload_bytes": 15,
+      "bytes_per_second": 19.224839526195186,
+      "child_cpu_seconds": 0.8754869999999997,
+      "max_child_rss": 7487488
+    }
+  },
+  "startup_seconds": 0.003282137500000104
+}

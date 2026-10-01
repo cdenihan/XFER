@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     env, io,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender, SyncSender},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -107,7 +107,7 @@ pub struct Browser {
 impl Browser {
     pub fn start() -> Result<Self> {
         let socket = multicast_listener()?;
-        let (peer_tx, peers) = mpsc::channel();
+        let (peer_tx, peers) = mpsc::sync_channel(256);
         let (stop, stop_rx) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("xfer-discovery-browser".into())
@@ -258,7 +258,7 @@ fn announce(
     }
 }
 
-fn browse(socket: UdpSocket, peers: &Sender<DiscoveredPeer>, stop: &Receiver<()>) {
+fn browse(socket: UdpSocket, peers: &SyncSender<DiscoveredPeer>, stop: &Receiver<()>) {
     let mut buffer = [0_u8; MAX_ANNOUNCEMENT_SIZE];
     loop {
         if stop.try_recv().is_ok() {
@@ -267,7 +267,10 @@ fn browse(socket: UdpSocket, peers: &Sender<DiscoveredPeer>, stop: &Receiver<()>
         match socket.recv_from(&mut buffer) {
             Ok((length, source)) => {
                 if let Some(peer) = decode_announcement(&buffer[..length], source)
-                    && peers.send(peer).is_err()
+                    && matches!(
+                        peers.try_send(peer),
+                        Err(mpsc::TrySendError::Disconnected(_))
+                    )
                 {
                     return;
                 }

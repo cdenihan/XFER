@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
+use crate::error::{Result, XferError};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 
@@ -18,7 +18,7 @@ use crate::{
     protocol::DEFAULT_PORT,
     reporter::CliReporter,
     transfer::{ReceiveOptions, SendOptions, human_bytes, receive, send},
-    tui, update,
+    update,
 };
 
 #[derive(Debug, Parser)]
@@ -179,9 +179,6 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Launch the interactive terminal interface.
-    Tui,
-
     /// List useful local IPv4 and IPv6 addresses.
     Ip,
 
@@ -235,13 +232,13 @@ enum PeerCommand {
     },
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        if io::stdin().is_terminal() && !cli.json {
-            return tui::run(cli.config_dir);
-        }
         Cli::command().print_help()?;
+        if !cli.json {
+            eprintln!("\nLaunch xfer-desktop for the graphical interface.");
+        }
         return Ok(());
     };
     match command {
@@ -350,10 +347,10 @@ pub fn run() -> anyhow::Result<()> {
                 if dry_run { "preview" } else { "synced" },
             );
             if !summary.conflicts.is_empty() {
-                anyhow::bail!(
+                return Err(XferError::Rejected(format!(
                     "{} conflict(s) preserved; resolve them and sync again",
                     summary.conflicts.len()
-                );
+                )));
             }
         }
         Command::Receive {
@@ -393,7 +390,6 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Tui => tui::run(cli.config_dir)?,
         Command::Ip => {
             let addresses = net::local_addresses()?;
             if cli.json {
@@ -445,7 +441,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Result<()> {
+fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> Result<()> {
     match command {
         PeerCommand::List => {
             let store = TrustStore::load(paths)?;
@@ -477,7 +473,9 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
         PeerCommand::Forget { endpoint } => {
             let removed = TrustStore::update(paths, |store| Ok(store.remove(&endpoint)))?;
             if !removed {
-                anyhow::bail!("no remembered peer named {endpoint}");
+                return Err(XferError::invalid_input(format!(
+                    "no remembered peer named {endpoint}"
+                )));
             }
             if json {
                 println!(
@@ -494,7 +492,9 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
         }
         PeerCommand::Clear { yes } => {
             if !yes {
-                anyhow::bail!("refusing to clear every peer without --yes");
+                return Err(XferError::invalid_input(
+                    "refusing to clear every peer without --yes",
+                ));
             }
             TrustStore::update(paths, |store| {
                 store.clear();
@@ -516,11 +516,13 @@ fn handle_peers(command: PeerCommand, paths: &Paths, json: bool) -> anyhow::Resu
     Ok(())
 }
 
-fn doctor(paths: &Paths, json: bool) -> anyhow::Result<()> {
+fn doctor(paths: &Paths, json: bool) -> Result<()> {
     paths.ensure()?;
     let identity = Identity::load_or_create(paths)?;
     let identity_fingerprint = display_fingerprint(&fingerprint(identity.public().as_bytes()));
-    let addresses = net::local_addresses().context("could not enumerate network interfaces")?;
+    let addresses = net::local_addresses().map_err(|error| {
+        XferError::Configuration(format!("could not enumerate network interfaces: {error}"))
+    })?;
     let report = serde_json::json!({
         "version": crate::VERSION,
         "config_directory": paths.root(),
@@ -602,10 +604,7 @@ fn print_summary(summary: &crate::transfer::TransferSummary, json: bool, action:
     }
 }
 
-fn handle_version_mismatch(
-    summary: &crate::transfer::TransferSummary,
-    json: bool,
-) -> anyhow::Result<()> {
+fn handle_version_mismatch(summary: &crate::transfer::TransferSummary, json: bool) -> Result<()> {
     let Some(peer_version) = summary.peer_version.as_deref() else {
         if json {
             println!(
@@ -682,7 +681,7 @@ fn handle_version_mismatch(
     Ok(())
 }
 
-fn print_update_summary(summary: &update::UpdateSummary, json: bool) -> anyhow::Result<()> {
+fn print_update_summary(summary: &update::UpdateSummary, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(summary)?);
     } else {

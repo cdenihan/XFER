@@ -119,7 +119,7 @@ pub fn derive_session_keys(
 
 pub fn fingerprint(public_key: &[u8; 32]) -> String {
     let digest = Sha256::digest(public_key);
-    hex::encode(digest)
+    crate::encoding::hex(digest)
 }
 
 pub fn display_fingerprint(fingerprint: &str) -> String {

@@ -15,7 +15,7 @@ use crate::{
     crypto::{derive_session_keys, display_fingerprint, fingerprint, sas, update_manifest},
     discovery::Advertiser,
     error::{Result, XferError},
-    filesystem::{TransferPlan, build_plan_with_gitignore, open_planned_file, path_to_wire},
+    filesystem::{TransferPlan, build_plan_controlled, open_planned_file, path_to_wire},
     net,
     protocol::{
         CHUNK_SIZE, ClientHello, Complete, Decision, EntryEnd, EntryKind, EntryStart, FrameKind,
@@ -28,7 +28,8 @@ use crate::{
     version::validate_peer_release_version,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum ConflictPolicy {
     #[default]
     Preserve,
@@ -103,11 +104,12 @@ fn send_inner(
 ) -> Result<TransferSummary> {
     control.check()?;
     validate_secure_token(options.secure, options.token.as_deref())?;
-    let plan = build_plan_with_gitignore(
+    let plan = build_plan_controlled(
         &options.input,
         &options.excludes,
         options.follow_links,
         options.gitignore,
+        control,
     )?;
     if (options.sync || options.two_way) && plan.kind != crate::protocol::TransferKind::Directory {
         return Err(XferError::invalid_input("sync requires a directory"));

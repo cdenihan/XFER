@@ -1,0 +1,152 @@
+name: Reusable Prepare Release
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        required: true
+        type: string
+      display-name:
+        required: true
+        type: string
+      cargo-package:
+        required: true
+        type: string
+      environment-prefix:
+        required: true
+        type: string
+      version-mode:
+        required: false
+        default: calendar
+        type: string
+      version-file:
+        required: false
+        default: VERSION
+        type: string
+      publish-workflow:
+        required: false
+        default: publish-release.yml
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  prepare:
+    name: Create and dispatch release commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Resolve and reserve release version
+        id: release
+        env:
+          CARGO_PACKAGE: ${{ inputs.cargo-package }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+        shell: bash
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          case "$VERSION_MODE" in
+            calendar)
+              release_date="$(date -u +'%Y.%m.%d')"
+              for attempt in {1..10}; do
+                release_version="$(
+                  gh api --paginate \
+                    "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${release_date}." \
+                    --jq '.[].ref' |
+                    sh scripts/next-release-version.sh "$release_date"
+                )"
+                if gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                  -f "ref=refs/tags/v${release_version}" \
+                  -f "sha=${source_commit}" >/dev/null 2>&1; then
+                  break
+                fi
+                if [[ "$attempt" == 10 ]]; then
+                  echo "Could not reserve a release number after $attempt attempts." >&2
+                  exit 1
+                fi
+              done
+              ;;
+            manifest)
+              release_version="$(
+                cargo metadata --locked --no-deps --format-version 1 |
+                  jq -r --arg package "$CARGO_PACKAGE" '.packages[] | select(.name == $package) | .version'
+              )"
+              [[ -n "$release_version" ]] || { echo "Cargo package not found: $CARGO_PACKAGE" >&2; exit 1; }
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f "ref=refs/tags/v${release_version}" \
+                -f "sha=${source_commit}" >/dev/null
+              ;;
+            *) echo "Unsupported version mode: $VERSION_MODE" >&2; exit 1 ;;
+          esac
+          {
+            echo "version=${release_version}"
+            echo "tag=v${release_version}"
+            echo "source_commit=${source_commit}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update calendar version
+        if: inputs.version-mode == 'calendar'
+        env:
+          CARGO_PACKAGE: ${{ inputs.cargo-package }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          VERSION_FILE: ${{ inputs.version-file }}
+        shell: bash
+        run: |
+          python3 scripts/set-release-version.py "$RELEASE_VERSION" \
+            --package "$CARGO_PACKAGE" --version-file "$VERSION_FILE"
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+      - name: Commit and push release version
+        id: commit
+        env:
+          DISPLAY_NAME: ${{ inputs.display-name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+        shell: bash
+        run: |
+          if [[ "$VERSION_MODE" == calendar ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml desktop/Cargo.toml Cargo.lock "$VERSION_FILE"
+            git commit --allow-empty -m "chore(release): ${DISPLAY_NAME} ${RELEASE_VERSION}"
+            git push origin HEAD:main
+          fi
+          release_commit="$(git rev-parse HEAD)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
+            -f "sha=${release_commit}" -F force=true >/dev/null
+          echo "commit=${release_commit}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch build and publish workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_WORKFLOW: ${{ inputs.publish-workflow }}
+          RELEASE_COMMIT: ${{ steps.commit.outputs.commit }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          # Dispatch from the default branch so trusted release caches are reusable
+          # across tags. The publish workflow still checks out and verifies the
+          # exact reserved commit before any cache access or build occurs.
+          gh workflow run "$PUBLISH_WORKFLOW" --ref main \
+            -f "version=${RELEASE_VERSION}" \
+            -f "tag=${RELEASE_TAG}" \
+            -f "commit=${RELEASE_COMMIT}"
+
+      - name: Delete unused reserved tag
+        if: failure() && steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 ||
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" || true

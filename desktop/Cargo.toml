@@ -1,0 +1,24 @@
+[package]
+name = "xfer-desktop"
+version = "2026.9.6-1"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[dependencies]
+xfer = { path = "..", default-features = false }
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[features]
+# Useful on macOS machines whose Xcode installation lacks the optional Metal compiler.
+runtime-shaders = ["gpui/runtime_shaders"]
+test-support = ["gpui/test-support"]
