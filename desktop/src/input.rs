@@ -616,6 +616,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let color = |value| crate::theme::Theme::new(window.appearance()).color(value);
         div()
             .flex()
             .key_context("TextInput")
@@ -641,11 +642,11 @@ impl Render for TextInput {
             .rounded_lg()
             .border_1()
             .border_color(if self.focus_handle.is_focused(window) {
-                rgb(0x63e6c9)
+                color(0x63e6c9)
             } else {
-                rgb(0x304157)
+                color(0x304157)
             })
-            .bg(rgb(0x101822))
+            .bg(color(0x101822))
             .overflow_hidden()
             .line_height(px(24.))
             .text_size(px(14.))
@@ -655,7 +656,7 @@ impl Render for TextInput {
                     .w_full()
                     .px_3()
                     .py_2()
-                    .bg(rgb(0x101822))
+                    .bg(color(0x101822))
                     .child(TextElement { input: cx.entity() }),
             )
     }

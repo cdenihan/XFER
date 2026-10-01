@@ -95,6 +95,7 @@ impl Reporter for CliReporter {
         if self.json {
             Self::emit_json("status", &serde_json::json!({ "message": message }));
         } else {
+            self.finish();
             eprintln!("• {message}");
         }
     }
@@ -138,6 +139,7 @@ impl Reporter for CliReporter {
                 &serde_json::json!({ "sas": sas, "fingerprint": fingerprint }),
             );
         } else {
+            self.finish();
             eprintln!("Security code: {sas}");
             eprintln!("Peer fingerprint: {fingerprint}");
         }

@@ -1,10 +1,14 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod assets;
 mod input;
+mod menus;
+mod theme;
+mod ui;
 use gpui::{
     App, Application, Bounds, Context, Div, ElementId, Entity, FocusHandle, Focusable, KeyBinding,
     PathPromptOptions, SharedString, Stateful, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div, img, prelude::*, px, relative, rgb, size, uniform_list,
+    WindowOptions, actions, div, img, prelude::*, px, relative, size, uniform_list,
 };
 use input::TextInput;
 use std::{
@@ -34,6 +38,8 @@ const LOG_LIMIT: usize = 256;
 enum View {
     Workflow,
     Settings,
+    Trusted,
+    Transfers,
 }
 #[derive(Clone, Copy)]
 enum Toggle {
@@ -115,6 +121,7 @@ fn launch_services(config: Option<PathBuf>, tx: SyncSender<Message>, stop: Arc<A
 struct Desktop {
     config: Option<PathBuf>,
     view: View,
+    theme: theme::Theme,
     action: Action,
     inputs: Vec<Entity<TextInput>>,
     focus: FocusHandle,
@@ -218,6 +225,7 @@ impl Desktop {
         Self {
             config,
             view: View::Workflow,
+            theme: theme::Theme::new(cx.window_appearance()),
             action: Action::Copy,
             inputs,
             focus: cx.focus_handle(),
@@ -575,16 +583,19 @@ impl Desktop {
         self.focus_field(-1, window, cx);
     }
     fn focus_field(&self, direction: isize, window: &mut Window, cx: &App) {
-        if self.view == View::Settings {
+        if self.view != View::Workflow {
             return;
         }
         let mut visible = if self.action == Action::Receive {
             vec![0]
         } else {
-            vec![0, 1]
+            vec![0, 1, 2]
         };
         if self.advanced {
-            visible.extend([2, 3]);
+            if self.action == Action::Receive {
+                visible.push(2);
+            }
+            visible.push(3);
             visible.push(if self.action == Action::Receive { 5 } else { 4 });
         }
         let current = visible
@@ -642,230 +653,49 @@ impl Desktop {
         });
         cx.notify();
     }
-    fn card(title: &str) -> Div {
+    fn card(&self, title: &str) -> Div {
         div()
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x293747))
-            .bg(rgb(0x151e29))
+            .border_color(self.color(0x293747))
+            .bg(self.color(0x151e29))
             .flex()
             .flex_col()
             .gap_3()
             .child(
                 div()
-                    .text_color(rgb(0xb8c9dc))
+                    .text_color(self.color(0xb8c9dc))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(title.to_string()),
             )
     }
-    fn form(&self, cx: &mut Context<Self>) -> Div {
-        let receiving = self.action == Action::Receive;
-        let mut source = Self::card(if receiving {
-            "01  Save incoming files"
-        } else {
-            "01  Choose your content"
-        })
-        .child(self.field(
-            if receiving {
-                "Destination folder"
-            } else {
-                "File or folder"
-            },
-            0,
-        ));
-        let mut pick = div().flex().gap_2();
-        if self.action == Action::Copy {
-            pick = pick.child(
-                self.button("file", "Choose file")
-                    .on_click(cx.listener(|this, _, _, cx| this.choose(false, cx))),
-            );
-        }
-        source = source.child(
-            pick.child(
-                self.button("folder", "Choose folder")
-                    .on_click(cx.listener(|this, _, _, cx| this.choose(true, cx))),
-            ),
-        );
-        let mut form = div().flex().flex_col().gap_4().child(source);
-        if !receiving {
-            let mut destination =
-                Self::card("02  Connect to a receiver").child(self.field("Address or hostname", 1));
-            if self.peers.is_empty() {
-                destination = destination.child(div().text_sm().text_color(rgb(0x95a5b8))
-                    .child("Nearby computers appear here when they start receiving. You can also enter an address."));
-            } else {
-                destination = destination
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x95a5b8))
-                            .child("Nearby receivers"),
-                    )
-                    .child(
-                        uniform_list(
-                            "discovered-peers",
-                            self.peers.len(),
-                            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                range
-                                    .map(|i| {
-                                        let peer = this.peers[i].clone();
-                                        this.button(
-                                            i,
-                                            format!(
-                                                "{}  ·  {}  ·  {}",
-                                                peer.name,
-                                                peer.address,
-                                                if peer.secure {
-                                                    "Encrypted"
-                                                } else {
-                                                    "Unencrypted"
-                                                }
-                                            ),
-                                        )
-                                        .w_full()
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.inputs[1].update(cx, |i, cx| {
-                                                    i.set(peer.address.ip().to_string(), cx)
-                                                });
-                                                this.inputs[2].update(cx, |i, cx| {
-                                                    i.set(peer.address.port().to_string(), cx)
-                                                });
-                                                cx.notify();
-                                            }),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .h(px((self.peers.len().min(3) * 44) as f32)),
-                    );
-            }
-            form = form.child(destination);
-        }
-        form = form.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(if self.secure {
-                            rgb(0x88e5cf)
-                        } else {
-                            rgb(0xffc981)
-                        })
-                        .child(if self.secure {
-                            "●  End-to-end encryption is on"
-                        } else {
-                            "●  Unencrypted transfer"
-                        }),
-                )
-                .child(
-                    self.button(
-                        "advanced",
-                        if self.advanced {
-                            "Hide options  −"
-                        } else {
-                            "Transfer options  +"
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.advanced = !this.advanced;
-                        cx.notify();
-                    })),
-                ),
-        );
-        if self.advanced {
-            let mut advanced = Self::card("Transfer options").child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(div().flex_1().min_w_0().child(self.field("Port", 2)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.field("Shared token (optional)", 3)),
-                    ),
-            );
-            advanced = advanced.child(self.field(
-                if receiving {
-                    "Bind address"
-                } else {
-                    "Exclude globs (separate with ;)"
-                },
-                if receiving { 5 } else { 4 },
-            ));
-            let mut options = div().flex().flex_wrap().gap_2().child(self.checkbox(
-                "Encryption",
-                self.secure,
-                Toggle::Secure,
-                cx,
-            ));
-            if self.action.syncing() {
-                options = options.child(self.checkbox(
-                    "Respect .gitignore",
-                    self.gitignore,
-                    Toggle::Gitignore,
-                    cx,
-                ));
-            }
-            if self.action == Action::Copy {
-                options = options.child(self.checkbox(
-                    "Follow safe symlinks",
-                    self.follow_links,
-                    Toggle::FollowLinks,
-                    cx,
-                ));
-            }
-            if receiving {
-                options = options
-                    .child(self.checkbox("Allow sync", self.allow_sync, Toggle::SyncAccess, cx))
-                    .child(self.checkbox("Overwrite copies", self.overwrite, Toggle::Overwrite, cx))
-                    .child(self.checkbox(
-                        "Nearby discovery",
-                        self.discoverable,
-                        Toggle::Discovery,
-                        cx,
-                    ));
-                advanced = advanced.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x95a5b8))
-                        .child("Sync updates this folder directly. Copies are saved inside it."),
-                );
-            }
-            form = form.child(advanced.child(options));
-        }
-        if !self.secure {
-            form = form.child(div().p_3().rounded_lg().bg(rgb(0x3b2e18)).text_color(rgb(0xffc981))
-                .child("Encryption and identity verification are off. Both computers must select this mode."));
-        }
-        form
+    fn color(&self, value: u32) -> gpui::Rgba {
+        self.theme.color(value)
     }
     fn button(&self, id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
         let id = id.into();
         let primary = id == ElementId::from("primary");
+        let theme = self.theme;
         div()
             .id(id)
+            .map(|mut button| {
+                button.style().align_self = Some(gpui::AlignItems::FlexStart);
+                button
+            })
             .px_3()
             .py_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x2b3a4d))
-            .bg(rgb(0x1c2735))
-            .text_color(rgb(0xe6edf5))
+            .border_color(self.color(0x2b3a4d))
+            .bg(self.color(0x1c2735))
+            .text_color(self.color(0xe6edf5))
             .cursor_pointer()
             .hover(move |s| {
                 s.bg(if primary {
-                    rgb(0x8bedda)
+                    theme.color(0x8bedda)
                 } else {
-                    rgb(0x293a4d)
+                    theme.color(0x293a4d)
                 })
             })
             .child(text.into())
@@ -878,7 +708,7 @@ impl Desktop {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x95a5b8))
+                    .text_color(self.color(0x95a5b8))
                     .child(label.to_string()),
             )
             .child(self.inputs[index].clone())
@@ -908,495 +738,11 @@ impl Drop for Desktop {
     }
 }
 impl Render for Desktop {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = self.job.is_some() || self.retiring.is_some();
-        let mut navigation = div().flex().gap_1().flex_wrap();
-        for action in [Action::Copy, Action::Receive, Action::Sync, Action::TwoWay] {
-            navigation = navigation.child(
-                self.button(
-                    action.title(),
-                    match action {
-                        Action::Copy => "Send",
-                        Action::Receive => "Receive",
-                        Action::Sync => "Sync",
-                        Action::TwoWay => "Two-way",
-                    },
-                )
-                .when(self.action == action && self.view == View::Workflow, |s| {
-                    s.bg(rgb(0x213b39))
-                        .border_color(rgb(0x4b9f8f))
-                        .text_color(rgb(0x8ff0d8))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.job.is_none() && this.retiring.is_none() {
-                        this.action = action;
-                        this.view = View::Workflow;
-                        this.preview_revision = None;
-                        this.summary = None;
-                        cx.notify();
-                    }
-                })),
-            );
-        }
-        navigation = navigation.child(self.button("settings", "Settings").on_click(cx.listener(
-            |this, _, _, cx| {
-                if this.job.is_none() && this.retiring.is_none() {
-                    this.view = View::Settings;
-                    this.refresh_peers();
-                    cx.notify();
-                }
-            },
-        )));
-        let mut body = div().w_full().max_w(px(720.)).flex().flex_col().gap_5();
-        if self.view == View::Settings {
-            body = body
-                .child(
-                    div()
-                        .text_size(px(28.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("Settings"),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(0x95a5b8))
-                        .child("Your identity and remembered peers are shared with the CLI."),
-                );
-            let mut peers = Self::card("Remembered computers");
-            if self.known.is_empty() {
-                peers = peers.child(div().text_color(rgb(0x95a5b8)).child("No remembered peers yet. Approve a security code during your first transfer to remember a computer."));
-            } else {
-                peers =
-                    peers
-                        .child(
-                            uniform_list(
-                                "known-peers",
-                                self.known.len(),
-                                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                    range
-                                        .map(|i| {
-                                            let (endpoint, fingerprint) = this.known[i].clone();
-                                            div()
-                                                .h(px(64.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_3()
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(endpoint.clone())
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(rgb(0x95a5b8))
-                                                                .child(fingerprint),
-                                                        ),
-                                                )
-                                                .child(
-                                                    this.button(i, "Forget")
-                                                        .text_color(rgb(0xffbacb))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.peer_update(
-                                                                    Some(endpoint.clone()),
-                                                                    cx,
-                                                                )
-                                                            },
-                                                        )),
-                                                )
-                                        })
-                                        .collect::<Vec<_>>()
-                                }),
-                            )
-                            .h(px((self.known.len().min(4) * 64) as f32)),
-                        )
-                        .child(div().text_sm().text_color(rgb(0x95a5b8)).child(
-                            "Forgetting a computer requires comparing its security code again.",
-                        ))
-                        .child(
-                            self.button(
-                                "clear-peers",
-                                if self.confirm_clear {
-                                    "Confirm forget all computers"
-                                } else {
-                                    "Forget all computers"
-                                },
-                            )
-                            .text_color(rgb(0xffbacb))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.confirm_clear {
-                                    this.confirm_clear = false;
-                                    this.peer_update(None, cx);
-                                } else {
-                                    this.confirm_clear = true;
-                                    cx.notify();
-                                }
-                            })),
-                        );
-            }
-            body = body.child(peers).child(
-                Self::card("About XFER")
-                    .child(format!("Version {}", xfer::VERSION))
-                    .child(div().text_sm().text_color(rgb(0x95a5b8)).child(format!(
-                            "Configuration: {}",
-                            self.config
-                                .as_ref()
-                                .map_or("~/.xfer".into(), |p| p.display().to_string())
-                        )))
-                    .child(
-                        self.button("releases", "Download desktop releases")
-                            .on_click(|_, _, cx| cx.open_url(RELEASES)),
-                    ),
-            );
-        } else {
-            body = body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(28.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(self.action.title()),
-                    )
-                    .child(div().text_color(rgb(0x95a5b8)).child(match self.action {
-                        Action::Copy => "Send a file or folder directly to another computer.",
-                        Action::Receive => {
-                            "Choose where incoming files land. Keep this window open to receive."
-                        }
-                        Action::Sync => {
-                            "Update another folder. Review the changes before applying them."
-                        }
-                        Action::TwoWay => {
-                            "Keep both folders in step. Review changes and resolve conflicts first."
-                        }
-                    })),
-            );
-            if !running {
-                body = body.child(self.form(cx));
-            } else {
-                body = body.child(
-                    div()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(rgb(0x172a2b))
-                        .text_color(rgb(0x88e5cf))
-                        .child(if self.retiring.is_some() {
-                            "Stopping the previous transfer…"
-                        } else if self.action == Action::Receive {
-                            "Listening for incoming transfers"
-                        } else {
-                            "Transfer in progress"
-                        }),
-                );
-                body = body.child(div().text_sm().text_color(rgb(0x95a5b8)).child(format!(
-                    "{}: {}",
-                    if self.action == Action::Receive {
-                        "Saving to"
-                    } else {
-                        "Content"
-                    },
-                    self.inputs[0].read(cx).value()
-                )));
-                if self.action == Action::Receive {
-                    if let Some(addresses) = &self.receiver_addresses {
-                        body = body.child(Self::card("Connect from another computer")
-                            .child(addresses.clone())
-                            .child(div().text_sm().text_color(rgb(0x95a5b8)).child("In Send, choose this computer from Nearby receivers or enter one of these addresses.")));
-                    }
-                } else {
-                    body = body.child(div().text_sm().text_color(rgb(0x95a5b8)).child(format!(
-                        "To {}:{}",
-                        self.inputs[1].read(cx).value(),
-                        self.inputs[2].read(cx).value()
-                    )));
-                }
-            }
-            if let Some((prompt, _)) = &self.trust {
-                body = body.child(
-                    div()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(rgb(0x3b2e18))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(if prompt.changed {
-                            "WARNING: saved peer identity changed"
-                        } else {
-                            "Compare this code on both computers"
-                        })
-                        .child(div().text_2xl().child(prompt.sas.clone()))
-                        .child(prompt.endpoint.clone())
-                        .child(prompt.fingerprint.clone())
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    self.button("trust", "Codes match — trust peer").on_click(
-                                        cx.listener(|this, _, _, cx| this.answer(true, cx)),
-                                    ),
-                                )
-                                .child(self.button("reject", "Reject").on_click(
-                                    cx.listener(|this, _, _, cx| this.answer(false, cx)),
-                                )),
-                        ),
-                );
-            } else if let Some((sas, fingerprint)) = &self.sas {
-                body = body.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(format!("Security code: {sas}"))
-                        .child(fingerprint.clone()),
-                );
-            }
-            if let Some(progress) = &self.progress {
-                let fraction = if progress.total == 0 {
-                    0.
-                } else {
-                    (progress.transferred as f32 / progress.total as f32).clamp(0., 1.)
-                };
-                body = body
-                    .child(format!("{} · {}", progress.phase, progress.current_path))
-                    .child(
-                        div()
-                            .h(px(8.))
-                            .rounded_md()
-                            .bg(rgb(0x1c2735))
-                            .child(div().h_full().w(relative(fraction)).bg(rgb(0x63e6c9))),
-                    )
-                    .child(format!(
-                        "{} / {} · {} / {} files",
-                        human_bytes(progress.transferred),
-                        human_bytes(progress.total),
-                        progress.files_done,
-                        progress.files_total
-                    ));
-            }
-            if let Some(summary) = &self.summary {
-                body = body.child(format!(
-                    "{} · {} files · {}",
-                    if summary.preview {
-                        "Preview"
-                    } else {
-                        "Complete"
-                    },
-                    summary.file_count,
-                    summary.destination.display()
-                ));
-                if let Some(stats) = summary.sync_stats {
-                    body = body.child(format!(
-                        "{} changes · {} unchanged · {} to send · {} reused",
-                        stats.changed_files,
-                        stats.unchanged_files,
-                        human_bytes(stats.sent_bytes),
-                        human_bytes(stats.reused_bytes)
-                    ));
-                }
-                if !summary.conflicts.is_empty() {
-                    body = body
-                        .child(format!("{} conflicts preserved", summary.conflicts.len()))
-                        .child(
-                            uniform_list(
-                                "conflicts",
-                                summary.conflicts.len(),
-                                cx.processor(|this, range: std::ops::Range<usize>, _, _| {
-                                    range
-                                        .map(|i| {
-                                            div().h(px(28.)).child(
-                                                this.summary.as_ref().unwrap().conflicts[i].clone(),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                }),
-                            )
-                            .h(px(110.)),
-                        );
-                }
-                if self.action == Action::TwoWay && summary.preview {
-                    let mut choices = div().flex().gap_2().flex_wrap();
-                    for (id, label, policy) in [
-                        ("preserve", "Preserve both", ConflictPolicy::Preserve),
-                        ("local", "Prefer local", ConflictPolicy::PreferLocal),
-                        ("remote", "Prefer remote", ConflictPolicy::PreferRemote),
-                    ] {
-                        choices = choices.child(self.button(id, label).on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.policy = policy;
-                                this.preview_revision = None;
-                                this.start(true, cx);
-                            },
-                        )));
-                    }
-                    body = body.child(choices);
-                }
-            }
-            let primary = if self.retiring.is_some() {
-                "Stopping…"
-            } else if running {
-                "Cancel"
-            } else if self.action == Action::Receive {
-                "Start receiving"
-            } else if self.action.syncing() && self.preview_revision == Some(self.revision) {
-                "Apply reviewed sync"
-            } else if self.action.syncing() {
-                "Preview sync"
-            } else {
-                "Send"
-            };
-            body = body.child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        self.button("primary", primary)
-                            .bg(rgb(0x63e6c9))
-                            .text_color(rgb(0x102821))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.job.is_some() {
-                                    this.cancel(&Cancel, window, cx);
-                                } else {
-                                    this.start(false, cx);
-                                }
-                            })),
-                    )
-                    .when(self.action.syncing(), |row| {
-                        row.child(
-                            self.button("preview", "Refresh preview")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.action.syncing() {
-                                        this.start(true, cx);
-                                    }
-                                })),
-                        )
-                    })
-                    .child(self.button("details", "Details").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.details = !this.details;
-                            cx.notify();
-                        },
-                    ))),
-            );
-            if running && self.progress.is_none() {
-                body = body.child(if self.retiring.is_some() {
-                    "Releasing the connection before another transfer can start…"
-                } else {
-                    "Preparing, connecting, or waiting for a sender…"
-                });
-            }
-            if self.details {
-                body = body
-                    .child(
-                        self.rates
-                            .description()
-                            .unwrap_or_else(|| "Waiting for payload progress".into()),
-                    )
-                    .child(
-                        uniform_list(
-                            "logs",
-                            self.logs.len(),
-                            cx.processor(|this, range: std::ops::Range<usize>, _, _| {
-                                range
-                                    .map(|i| div().h(px(30.)).text_sm().child(this.logs[i].clone()))
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .h(px(180.)),
-                    )
-                    .child(
-                        self.button("peer-release", "Align versions / download releases")
-                            .on_click(|_, _, cx| cx.open_url(RELEASES)),
-                    );
-            }
-        }
-        if let Some(error) = &self.error {
-            body = body.child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgb(0x422631))
-                    .text_color(rgb(0xffbacb))
-                    .child(error.clone()),
-            );
-        }
-        div()
-            .id("desktop")
-            .key_context("Desktop")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::submit))
-            .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::next_field))
-            .on_action(cx.listener(Self::previous_field))
-            .size_full()
-            .bg(rgb(0x0e141c))
-            .text_color(rgb(0xe6edf5))
-            .font_family(if cfg!(target_os = "macos") {
-                ".SystemUIFont"
-            } else {
-                "sans-serif"
-            })
-            .text_size(px(14.))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_5()
-                    .pt_4()
-                    .pb_3()
-                    .border_b_1()
-                    .border_color(rgb(0x243141))
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(img(self.logo.clone()).size(px(36.)))
-                                    .child(
-                                        div()
-                                            .text_xl()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child("XFER"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x95a5b8))
-                                    .child("Direct. Private. Local."),
-                            ),
-                    )
-                    .child(navigation),
-            )
-            .child(
-                div()
-                    .id("content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(body),
-            )
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_ui(window, cx)
     }
 }
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut config = std::env::var_os("XFER_CONFIG_DIR").map(PathBuf::from);
@@ -1420,7 +766,14 @@ fn main() {
             std::process::exit(2);
         }
     }
-    Application::new().run(move |cx| {
+    let application = Application::new().with_assets(assets::Assets);
+    application.on_reopen(|cx| {
+        if let Some(window) = cx.windows().first() {
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        }
+        cx.activate(true);
+    });
+    application.run(move |cx| {
         let modifier = if cfg!(target_os = "macos") {
             "cmd"
         } else {
@@ -1449,7 +802,18 @@ fn main() {
             KeyBinding::new(&format!("{modifier}-x"), input::Cut, Some("TextInput")),
             KeyBinding::new(&format!("{modifier}-q"), Quit, None),
         ]);
-        let bounds = Bounds::centered(None, size(px(940.), px(780.)), cx);
+        cx.bind_keys([
+            KeyBinding::new(&format!("{modifier}-,"), menus::Settings, None),
+            KeyBinding::new(&format!("{modifier}-o"), menus::ChooseFile, None),
+            KeyBinding::new(&format!("{modifier}-shift-o"), menus::ChooseFolder, None),
+            KeyBinding::new(&format!("{modifier}-w"), menus::Close, None),
+            KeyBinding::new(&format!("{modifier}-m"), menus::Minimize, None),
+            KeyBinding::new(&format!("{modifier}-h"), menus::Hide, None),
+            KeyBinding::new(&format!("{modifier}-alt-h"), menus::HideOthers, None),
+            KeyBinding::new("ctrl-cmd-f", menus::Fullscreen, None),
+        ]);
+        menus::install(cx);
+        let bounds = Bounds::centered(None, size(px(1320.), px(760.)), cx);
         if let Err(error) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1467,6 +831,16 @@ fn main() {
                 cx.on_action(move |_: &Quit, cx| {
                     let _ = quit.update(cx, |this, cx| this.shutdown(cx));
                 });
+                let appearance = entity.downgrade();
+                let subscription = window.observe_window_appearance(move |_, cx| {
+                    let _ = appearance.update(cx, |this, cx| {
+                        for input in &this.inputs {
+                            input.update(cx, |_, cx| cx.notify());
+                        }
+                        cx.notify();
+                    });
+                });
+                entity.update(cx, |this, _| this._subscriptions.push(subscription));
                 let weak = entity.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
                     let _ = weak.update(cx, |this, cx| this.shutdown(cx));

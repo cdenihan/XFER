@@ -7,7 +7,7 @@ use crate::{
     secure_store::{LockedJsonStore, SecureDir},
     transfer::{
         ConflictPolicy, ReceiveOptions, SendOptions, TransferSummary, human_bytes,
-        receive_on_listener_controlled, send_controlled, validate_receive_options,
+        receive_sessions_controlled, send_controlled, validate_receive_options,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -225,16 +225,13 @@ impl Job {
                     if recent.action == Action::Receive {
                         validate_receive_options(&receiver)?;
                         let listener = crate::net::bind(&receiver.bind, receiver.port)?;
-                        loop {
-                            reporter.control.check()?;
-                            let summary = receive_on_listener_controlled(
-                                &listener,
-                                &receiver,
-                                &reporter,
-                                &reporter.control,
-                            )?;
-                            reporter.send(WorkerEvent::Received(summary))?;
-                        }
+                        receive_sessions_controlled(
+                            &listener,
+                            &receiver,
+                            &reporter,
+                            &reporter.control,
+                            |summary| reporter.send(WorkerEvent::Received(summary)),
+                        )
                     } else {
                         send_controlled(&sender, &reporter, &reporter.control)
                     }
@@ -283,6 +280,15 @@ pub fn send_options(recent: &Recent, config: Option<PathBuf>) -> SendOptions {
         connect_timeout: Duration::from_secs(30),
         config_dir: config,
     }
+}
+
+/// Creates a 128-bit token for a temporary desktop workflow. Callers never persist it.
+pub fn temporary_token() -> Result<String> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        crate::error::XferError::security(format!("could not generate a token: {error}"))
+    })?;
+    Ok(crate::encoding::hex(bytes))
 }
 
 #[cfg(test)]

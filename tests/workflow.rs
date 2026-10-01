@@ -83,6 +83,13 @@ fn desktop_worker_receives_cli_sessions_cancels_blocked_io_and_retries() {
         .unwrap()
     };
     let job = start(1);
+    listening(&job);
+    // A disconnected or malformed unauthenticated client cannot take the receiver offline.
+    drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+    wait_for(
+        &job,
+        |event| matches!(event, WorkerEvent::Status(text) if text.starts_with("Session ended:")),
+    );
     for name in ["résumé.txt", "second.txt"] {
         listening(&job);
         let source = directory.path().join(name);

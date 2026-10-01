@@ -116,6 +116,15 @@ interrupt active socket I/O. DNS and Git subprocesses must finish before their
 workers stop; the window stays responsive and ignores stale results.
 Completed files remain in place after a cancelled sync, so rerunning reuses them.
 
+The desktop dashboard follows your system’s light or dark appearance. Use the sidebar
+for Home, Transfers, Sync, Trusted Devices, and Settings. Drop one file or folder
+onto the content card, choose a nearby receiver, or enter an address manually.
+Temporary shared tokens stay in memory and are never saved.
+
+On macOS, the native menus provide file/folder selection, clipboard editing,
+Settings (`⌘,`), window controls, and Quit (`⌘Q`). Menu actions and keyboard shortcuts
+use the same application actions. Quit cancels workers and rejects pending trust prompts.
+
 Settings manages remembered peers and links to desktop release downloads.
 The desktop reads the same `~/.xfer` identity, peer store, recent workflow, and
 sync history as the CLI. Override it using `--config-dir PATH` or `XFER_CONFIG_DIR`.

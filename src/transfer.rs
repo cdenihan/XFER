@@ -290,6 +290,55 @@ pub fn receive_on_listener_controlled(
     control.finish(receive_bound_inner(listener, options, reporter, control))
 }
 
+/// Keeps the desktop listener available after both successful and rejected sessions.
+pub(crate) fn receive_sessions_controlled(
+    listener: &TcpListener,
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+    completed: impl Fn(TransferSummary) -> Result<()>,
+) -> Result<TransferSummary> {
+    validate_receive_options(options)?;
+    let local = listener.local_addr()?;
+    match net::listener_endpoints(local.ip(), local.port()) {
+        Ok(endpoints) => reporter.status(&format!(
+            "receiver addresses: {}",
+            endpoints
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Err(error) => reporter.status(&format!("could not enumerate receiver addresses: {error}")),
+    }
+    loop {
+        control.check()?;
+        reporter.status(&format!("listening on {local}"));
+        let advertiser = if options.discoverable {
+            match Advertiser::start(local.port(), options.secure, local.ip()) {
+                Ok(advertiser) => Some(advertiser),
+                Err(error) => {
+                    reporter.status(&format!(
+                        "LAN discovery unavailable; manual IP entry still works: {error}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (stream, peer) = control.accept(listener)?;
+        drop(advertiser);
+        match control.finish(receive_connected(stream, peer, options, reporter, control)) {
+            Ok(summary) => completed(summary)?,
+            Err(XferError::Cancelled) => return Err(XferError::Cancelled),
+            Err(error) => reporter.status(&format!(
+                "Session ended: {error}. Waiting for another sender."
+            )),
+        }
+    }
+}
+
 fn receive_bound_inner(
     listener: &TcpListener,
     options: &ReceiveOptions,
@@ -361,6 +410,16 @@ fn receive_on_listener_inner(
     reporter.status(&format!("listening on {local}"));
     let (stream, peer) = control.accept(listener)?;
     drop(advertiser);
+    receive_connected(stream, peer, options, reporter, control)
+}
+
+fn receive_connected(
+    stream: std::net::TcpStream,
+    peer: SocketAddr,
+    options: &ReceiveOptions,
+    reporter: &dyn Reporter,
+    control: &TransferControl,
+) -> Result<TransferSummary> {
     net::configure_stream(&stream)?;
     reporter.status(&format!("connection from {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
