@@ -477,8 +477,13 @@ fn wget_redirect(base: &str, response: &str) -> Result<Option<String>> {
     if location.starts_with('/') {
         return Ok(Some(format!("{origin}{location}")));
     }
-    let path = path.split(['?', '#']).next().unwrap_or("");
-    if location.starts_with('?') || location.starts_with('#') {
+    let path_without_fragment = path.split('#').next().unwrap_or("");
+    if location.starts_with('#') {
+        // A fragment-only reference inherits both the current path and query.
+        return Ok(Some(format!("{origin}/{path_without_fragment}{location}")));
+    }
+    let path = path_without_fragment.split('?').next().unwrap_or("");
+    if location.starts_with('?') {
         return Ok(Some(format!("{origin}/{path}{location}")));
     }
     let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
@@ -764,6 +769,10 @@ mod tests {
                 "?download=1",
                 "https://example.test/releases/installer?download=1",
             ),
+            (
+                "#checksum",
+                "https://example.test/releases/installer#checksum",
+            ),
         ] {
             assert_eq!(
                 wget_redirect(base, &redirect(location)).unwrap().as_deref(),
@@ -776,6 +785,24 @@ mod tests {
                 .is_none()
         );
         assert!(wget_redirect(base, "  HTTP/1.1 302 Found\n").is_err());
+        assert_eq!(
+            wget_redirect(
+                "https://example.test/releases/installer?download=1#old",
+                &redirect("#checksum")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("https://example.test/releases/installer?download=1#checksum")
+        );
+        assert_eq!(
+            wget_redirect(
+                "https://example.test/releases/installer?old=1#fragment",
+                &redirect("?download=1")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("https://example.test/releases/installer?download=1")
+        );
     }
     #[test]
     fn checksum_verification_rejects_modified_content() {

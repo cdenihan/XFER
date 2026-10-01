@@ -51,7 +51,7 @@ wget() {
     wget_url=$3
     printf '%s\n' "$wget_url" >> "$TEMPORARY/wget-calls"
     case "$wget_url" in
-        https://example.invalid/start)
+        https://example.invalid/start|https://example.invalid/start*\#old)
             printf '  HTTP/1.1 302 Found\n  Location: %s\n' "$WGET_REDIRECT" >&2
             return 8 ;;
         https://example.invalid/final)
@@ -63,6 +63,20 @@ WGET_REDIRECT=/final
 wget_download https://example.invalid/start "$TEMPORARY/wget-result"
 assert_equal 'verified artifact' "$(cat "$TEMPORARY/wget-result")" 'wget HTTPS redirect'
 assert_equal '2' "$(wc -l < "$TEMPORARY/wget-calls" | tr -d ' ')" 'wget redirect hop count'
+WGET_REDIRECT='#checksum'
+if (wget_download 'https://example.invalid/start?download=1#old' "$TEMPORARY/fragment") >/dev/null 2>&1; then
+    printf '%s\n' 'FAIL: unexpected success from fragment redirect fixture' >&2
+    exit 1
+fi
+assert_equal 'https://example.invalid/start?download=1#checksum' \
+    "$(tail -n 1 "$TEMPORARY/wget-calls")" 'wget fragment redirect resolution'
+WGET_REDIRECT='?download=2'
+if (wget_download 'https://example.invalid/start?download=1#old' "$TEMPORARY/query") >/dev/null 2>&1; then
+    printf '%s\n' 'FAIL: unexpected success from query redirect fixture' >&2
+    exit 1
+fi
+assert_equal 'https://example.invalid/start?download=2' \
+    "$(tail -n 1 "$TEMPORARY/wget-calls")" 'wget query redirect resolution'
 for WGET_REDIRECT in http://example.invalid/final ftp://example.invalid/final 'https://example.invalid\evil'; do
     if (wget_download https://example.invalid/start "$TEMPORARY/forbidden") >/dev/null 2>&1; then
         printf '%s\n' 'FAIL: invalid wget redirect accepted' >&2

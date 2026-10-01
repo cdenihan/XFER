@@ -112,7 +112,14 @@ wget_download() {
             //*) request_url="https:$location" ;;
             /*) request_url="https://$authority$location" ;;
             *:*) die "refusing a non-HTTPS download redirect" ;;
-            \?*|\#*) request_url="${request_url%%\?*}$location" ;;
+            \?*)
+                request_url=${request_url%%\#*}
+                request_url="${request_url%%\?*}$location"
+                ;;
+            \#*)
+                request_url=${request_url%%\#*}
+                request_url="$request_url$location"
+                ;;
             *)
                 parent=${request_url%/*}
                 [ "$parent" != 'https:/' ] || parent="https://$authority"

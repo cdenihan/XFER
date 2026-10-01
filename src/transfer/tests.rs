@@ -1032,7 +1032,7 @@ fn explicit_conflict_resolution_previews_then_applies_the_selected_side() {
     let preview = pair
         .run_policy(true, true, ConflictPolicy::PreferRemote)
         .unwrap();
-    assert!(preview.conflicts.is_empty());
+    assert_eq!(preview.conflicts, Vec::<String>::new());
     assert_eq!(preview.sync_stats.unwrap().changed_files, 1);
     assert_eq!(fs::read(pair.local().join("file")).unwrap(), b"local");
     pair.run_policy(true, false, ConflictPolicy::PreferRemote)

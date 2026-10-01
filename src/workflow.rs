@@ -235,9 +235,8 @@ impl Job {
                             )?;
                             reporter.send(WorkerEvent::Received(summary))?;
                         }
-                    } else {
-                        send_controlled(&sender, &reporter, &reporter.control)
                     }
+                    send_controlled(&sender, &reporter, &reporter.control)
                 })();
                 let _ = reporter.send(WorkerEvent::Finished(result));
             })?;
