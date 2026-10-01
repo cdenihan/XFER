@@ -379,26 +379,114 @@ fn download_file(url: &str, destination: &Path) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
 
-        let status = Command::new("wget")
-            .arg("-q")
-            .arg("-O")
+        download_with_wget(url, destination)
+    }
+}
+
+#[cfg(not(windows))]
+fn download_with_wget(url: &str, destination: &Path) -> Result<()> {
+    let mut url = url.to_string();
+    for redirects in 0..=20 {
+        let output = Command::new("wget")
+            .args([
+                "--server-response",
+                "--max-redirect=0",
+                "--tries=1",
+                "--timeout=30",
+                "-O",
+            ])
             .arg(destination)
-            .arg(url)
-            .status()
+            .arg(&url)
+            .output()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    Error::Configuration("curl or wget is required to update this CLI".into())
+                    Error::Configuration("curl or GNU wget is required to update this CLI".into())
                 } else {
                     Error::Io(error)
                 }
             })?;
-        if !status.success() {
-            return Err(Error::Configuration(format!(
-                "wget could not download {url} (exit status {status})"
-            )));
+        if output.status.success() {
+            return Ok(());
         }
-        Ok(())
+        let response = String::from_utf8_lossy(&output.stderr);
+        let next = wget_redirect(&url, &response)?;
+        match next {
+            Some(next) if redirects < 20 => url = next,
+            Some(_) => {
+                return Err(Error::Configuration(
+                    "too many HTTPS download redirects".into(),
+                ));
+            }
+            None => {
+                return Err(Error::Configuration(format!(
+                    "wget could not download {url}: {}",
+                    command_failure_text(&output.stdout, &output.stderr)
+                )));
+            }
+        }
     }
+    unreachable!("redirect loop returns on its last iteration")
+}
+
+#[cfg(not(windows))]
+fn wget_redirect(base: &str, response: &str) -> Result<Option<String>> {
+    let mut status = None;
+    let mut location = None;
+    for line in response.lines().filter_map(|line| line.strip_prefix("  ")) {
+        if line.starts_with("HTTP/") {
+            status = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u16>().ok());
+            location = None;
+        } else if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("location")
+        {
+            location = Some(value.trim());
+        }
+    }
+    if !matches!(status, Some(301 | 302 | 303 | 307 | 308)) {
+        return Ok(None);
+    }
+    let location = location
+        .ok_or_else(|| Error::Configuration("HTTPS redirect has no Location header".into()))?;
+    if location.is_empty() || location.chars().any(char::is_control) || location.contains('\\') {
+        return Err(Error::Security("invalid HTTPS redirect location".into()));
+    }
+    if location.starts_with("https://") {
+        return Ok(Some(location.to_string()));
+    }
+    if location.starts_with("//") {
+        return Ok(Some(format!("https:{location}")));
+    }
+    // A colon in the first path segment identifies a URI scheme, not a relative path.
+    if location
+        .split('/')
+        .next()
+        .is_some_and(|segment| segment.contains(':'))
+    {
+        return Err(Error::Security(
+            "refusing a non-HTTPS download redirect".into(),
+        ));
+    }
+    let rest = base
+        .strip_prefix("https://")
+        .ok_or_else(|| Error::Security("HTTPS redirect base is invalid".into()))?;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let origin = format!("https://{authority}");
+    if location.starts_with('/') {
+        return Ok(Some(format!("{origin}{location}")));
+    }
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    if location.starts_with('?') || location.starts_with('#') {
+        return Ok(Some(format!("{origin}/{path}{location}")));
+    }
+    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    Ok(Some(if parent.is_empty() {
+        format!("{origin}/{location}")
+    } else {
+        format!("{origin}/{parent}/{location}")
+    }))
 }
 
 fn verify_checksum(artifact: &Path, checksum_file: &Path) -> Result<()> {
@@ -652,6 +740,43 @@ mod tests {
         assert!(validate_spec(&invalid).is_err());
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn wget_rejects_redirect_downgrades_and_resolves_https_locations() {
+        let redirect = |location: &str| format!("  HTTP/1.1 302 Found\n  Location: {location}\n");
+        let base = "https://example.test/releases/installer";
+        for location in [
+            "http://example.test/installer",
+            "ftp://example.test/installer",
+            "file:///tmp/installer",
+        ] {
+            assert!(matches!(
+                wget_redirect(base, &redirect(location)),
+                Err(Error::Security(_))
+            ));
+        }
+        for (location, expected) in [
+            ("https://cdn.test/file", "https://cdn.test/file"),
+            ("//cdn.test/file", "https://cdn.test/file"),
+            ("/file", "https://example.test/file"),
+            ("next", "https://example.test/releases/next"),
+            (
+                "?download=1",
+                "https://example.test/releases/installer?download=1",
+            ),
+        ] {
+            assert_eq!(
+                wget_redirect(base, &redirect(location)).unwrap().as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(
+            wget_redirect(base, "  HTTP/1.1 404 Not Found\n  Location: /file\n")
+                .unwrap()
+                .is_none()
+        );
+        assert!(wget_redirect(base, "  HTTP/1.1 302 Found\n").is_err());
+    }
     #[test]
     fn checksum_verification_rejects_modified_content() {
         let directory = tempfile::tempdir().unwrap();

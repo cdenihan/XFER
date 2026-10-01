@@ -208,11 +208,17 @@ fn secure_handshake_rejects_wrong_token_before_trust() {
     let client_paths = Paths::discover(Some(client_dir.path().to_path_buf())).unwrap();
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        establish_server(stream, true, Some("server"), &server_paths, &SilentReporter)
+        establish_server(
+            ControlledStream::new(stream, &TransferControl::default()),
+            true,
+            Some("server"),
+            &server_paths,
+            &SilentReporter,
+        )
     });
     let stream = TcpStream::connect(address).unwrap();
     let result = establish_client(
-        stream,
+        ControlledStream::new(stream, &TransferControl::default()),
         true,
         Some("client"),
         &client_paths,
@@ -252,13 +258,19 @@ fn known_peer_reconnect_updates_last_seen_and_suspends_server_timeout() {
 
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        let mut session =
-            establish_server(stream, true, None, &server_paths, &SilentReporter).unwrap();
+        let mut session = establish_server(
+            ControlledStream::new(stream, &TransferControl::default()),
+            true,
+            None,
+            &server_paths,
+            &SilentReporter,
+        )
+        .unwrap();
         session.get_mut().read_timeout().unwrap()
     });
     let stream = TcpStream::connect(address).unwrap();
     establish_client(
-        stream,
+        ControlledStream::new(stream, &TransferControl::default()),
         true,
         None,
         &client_paths,
@@ -412,12 +424,18 @@ fn changed_pinned_identity_is_rejected_without_store_update() {
 
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        establish_server(stream, true, None, &server_paths, &SilentReporter)
+        establish_server(
+            ControlledStream::new(stream, &TransferControl::default()),
+            true,
+            None,
+            &server_paths,
+            &SilentReporter,
+        )
     });
     let stream = TcpStream::connect(address).unwrap();
     assert!(
         establish_client(
-            stream,
+            ControlledStream::new(stream, &TransferControl::default()),
             true,
             None,
             &client_paths,
@@ -522,7 +540,7 @@ fn connect_timeout_covers_protocol_negotiation() {
     let stream = TcpStream::connect(address).unwrap();
     let started = Instant::now();
     let result = establish_client(
-        stream,
+        ControlledStream::new(stream, &TransferControl::default()),
         false,
         None,
         &client_paths,
@@ -587,14 +605,23 @@ fn changed_identity_can_be_confirmed_but_cannot_overwrite_a_concurrent_change() 
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             net::configure_stream(&stream).unwrap();
-            establish_server(stream, true, None, &server_paths, &SilentReporter)
+            establish_server(
+                ControlledStream::new(stream, &TransferControl::default()),
+                true,
+                None,
+                &server_paths,
+                &SilentReporter,
+            )
         });
         let reporter = ConfirmChangedReporter {
             paths: client_paths.clone(),
             replace_during_prompt,
         };
         let result = establish_client(
-            TcpStream::connect(address).unwrap(),
+            ControlledStream::new(
+                TcpStream::connect(address).unwrap(),
+                &TransferControl::default(),
+            ),
             true,
             None,
             &client_paths,
@@ -635,7 +662,12 @@ fn rejected_transfer(script: impl FnOnce(&mut RecordStream<TcpStream>)) -> Strin
     let receiver = thread::spawn(move || {
         let (stream, peer) = listener.accept().unwrap();
         net::configure_stream(&stream).unwrap();
-        let mut session = RecordStream::new(stream, Role::Server, None, None);
+        let mut session = RecordStream::new(
+            ControlledStream::new(stream, &TransferControl::default()),
+            Role::Server,
+            None,
+            None,
+        );
         receive_transfer(
             &mut session,
             &options,

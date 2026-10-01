@@ -33,16 +33,16 @@ Delta signature generation now reuses its buffer. Conflict choices use indexed i
 
 ## Checks and limitations
 
-- CLI configuration: 128 unit tests, 19 CLI integration tests, four process/storage tests, and two desktop-worker interoperability tests pass. The core without CLI features passes 126 unit tests.
-- Desktop: six GPUI tests pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, rejection of pending changed-identity trust prompts, stale preview completion, receiver cleanup before retry, mouse focus, and Windows clipboard line endings.
+- CLI configuration: 132 unit tests, 19 CLI integration tests, four process/storage tests, and two desktop-worker interoperability tests pass. The core without CLI features passes 130 unit tests.
+- Desktop: seven GPUI tests pass, covering Unicode/IME input, all workflow views with collapsed and expanded options at a small window size, preview invalidation, rejection of pending changed-identity trust prompts, stale preview completion, receiver cleanup before retry, mouse focus, Windows clipboard line endings, and preserving preview approval during focus and cursor changes.
 - Both configurations pass formatting, Clippy with warnings denied, and release compilation. Local desktop builds use `runtime-shaders`.
 - Desktop workers interoperate with CLI processes in both directions, including encrypted transfers, matching security codes, changed-identity rejection/approval, retries, repeated receive sessions, and cancellation during blocked handshake reads.
 - POSIX installer rollback/checksum fixtures, two installer-rendering tests, one release-version test, and three packaging tests pass. Archive tests validate platform icons, macOS metadata, Windows contents, checksums, and Linux installation with unusual home-directory paths.
 - Workflow YAML syntax passes. PowerShell installer execution is unverified locally; Windows CI includes installer checks.
 - The declared core minimum is Rust 1.89; this machine only tested Rust 1.98.1. Desktop requires Rust 1.98 because of the locked dependency graph.
 - The app bundle launched and rendered on macOS. Full interactive end-to-end UI and keyboard/accessibility verification remain unverified. It used the optional runtime-shaders feature; this machine lacks Xcode’s optional Metal compiler. Release CI uses precompiled shaders.
-- Windows and Linux desktop compilation, GPU rendering, and native package launches require their CI runners and hardware; they were not executed locally.
+- Windows, macOS, and Linux desktop compilation, GPUI tests, release builds, and packaging pass on native CI runners. Windows and Linux interactive GPU rendering and native package launches remain unverified.
 - Window close waits asynchronously up to two seconds for cancelled workers to clean up. Native OS quit uses GPUI’s shorter shutdown grace period; blocking DNS and filesystem locks may outlive either grace period.
 - Publisher code signing, notarization, and desktop self-update are deferred. macOS bundles receive an ad hoc resource seal, verified locally, so packaged icons remain valid bundle resources.
-- cargo-audit and actionlint are unavailable and remain unverified at the user’s request. Basic workflow YAML parsing is checked separately.
+- The RustSec audit passes in CI. Local cargo-audit and actionlint installation was skipped at the user’s request; actionlint remains unverified. Basic workflow YAML parsing is checked separately.
 - GPUI 0.2.2 transitively includes block 0.1.6 and proc-macro-error2 2.0.1, which Rust flags for future compatibility. This change does not patch or fork upstream crates.

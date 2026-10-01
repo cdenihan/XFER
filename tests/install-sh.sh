@@ -40,6 +40,37 @@ if (download_file http://example.invalid/file "$TEMPORARY/forbidden") >/dev/null
     exit 1
 fi
 
+# Exercise wget-only downloads without making network requests.
+wget() {
+    case "$*" in
+        *--max-redirect=0*) ;;
+        *) return 99 ;;
+    esac
+    while [ "$1" != '-O' ]; do shift; done
+    wget_destination=$2
+    wget_url=$3
+    printf '%s\n' "$wget_url" >> "$TEMPORARY/wget-calls"
+    case "$wget_url" in
+        https://example.invalid/start)
+            printf '  HTTP/1.1 302 Found\n  Location: %s\n' "$WGET_REDIRECT" >&2
+            return 8 ;;
+        https://example.invalid/final)
+            printf 'verified artifact' > "$wget_destination" ;;
+        *) return 9 ;;
+    esac
+}
+WGET_REDIRECT=/final
+wget_download https://example.invalid/start "$TEMPORARY/wget-result"
+assert_equal 'verified artifact' "$(cat "$TEMPORARY/wget-result")" 'wget HTTPS redirect'
+assert_equal '2' "$(wc -l < "$TEMPORARY/wget-calls" | tr -d ' ')" 'wget redirect hop count'
+for WGET_REDIRECT in http://example.invalid/final ftp://example.invalid/final 'https://example.invalid\evil'; do
+    if (wget_download https://example.invalid/start "$TEMPORARY/forbidden") >/dev/null 2>&1; then
+        printf '%s\n' 'FAIL: invalid wget redirect accepted' >&2
+        exit 1
+    fi
+done
+unset -f wget
+
 mkdir -p "$TEMPORARY/release/latest/download" "$TEMPORARY/install"
 artifact=$(artifact_for "$(uname -s)" "$(normalize_arch "$(uname -m)")" musl)
 binary="$TEMPORARY/release/latest/download/$artifact"

@@ -72,7 +72,6 @@ pub fn preferences(config: Option<PathBuf>) -> Result<LockedJsonStore<Recent>> {
     ))
 }
 pub fn expand_path(text: &str) -> Result<PathBuf> {
-    let text = text.trim();
     if text == "~" || text.starts_with("~/") {
         return Ok(dirs::home_dir()
             .ok_or_else(|| XferError::invalid_input("Home directory is unavailable."))?
@@ -289,6 +288,14 @@ pub fn send_options(recent: &Recent, config: Option<PathBuf>) -> SendOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_paths_preserve_significant_whitespace() {
+        assert_eq!(expand_path(" folder ").unwrap(), PathBuf::from(" folder "));
+        assert_eq!(
+            expand_path("~/folder ").unwrap(),
+            dirs::home_dir().unwrap().join("folder ")
+        );
+    }
     #[test]
     fn preferences_read_old_workflows_and_never_store_tokens() {
         let value: Recent = serde_json::from_str(

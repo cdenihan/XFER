@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 
 use crate::{
     config::{Identity, Paths, TrustStore},
-    control::TransferControl,
+    control::{ControlledStream, TransferControl},
     crypto::{derive_session_keys, display_fingerprint, fingerprint, sas, update_manifest},
     discovery::Advertiser,
     error::{Result, XferError},
@@ -127,7 +127,7 @@ fn send_inner(
     reporter.status(&format!("connected to {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
     let mut session = establish_client(
-        stream,
+        ControlledStream::new(stream, control),
         options.secure,
         options.token.as_deref(),
         &paths,
@@ -365,7 +365,7 @@ fn receive_on_listener_inner(
     reporter.status(&format!("connection from {peer}"));
     let paths = Paths::discover(options.config_dir.clone())?;
     let mut session = establish_server(
-        stream,
+        ControlledStream::new(stream, control),
         options.secure,
         options.token.as_deref(),
         &paths,
@@ -382,7 +382,7 @@ fn receive_on_listener_inner(
 }
 
 fn receive_transfer(
-    session: &mut RecordStream<TcpStream>,
+    session: &mut RecordStream<ControlledStream>,
     options: &ReceiveOptions,
     reporter: &dyn Reporter,
     peer: SocketAddr,
@@ -501,13 +501,13 @@ fn validate_completion(complete: &Complete, files_done: u64, transferred: u64) -
 }
 
 fn establish_client(
-    mut stream: TcpStream,
+    mut stream: ControlledStream,
     secure: bool,
     token: Option<&str>,
     paths: &Paths,
     reporter: &dyn Reporter,
     deadline: Instant,
-) -> Result<RecordStream<TcpStream>> {
+) -> Result<RecordStream<ControlledStream>> {
     net::apply_deadline(&stream, deadline)?;
     client_negotiate(&mut stream, secure)?;
     if !secure {
@@ -592,12 +592,12 @@ fn establish_client(
 }
 
 fn establish_server(
-    mut stream: TcpStream,
+    mut stream: ControlledStream,
     secure: bool,
     token: Option<&str>,
     paths: &Paths,
     reporter: &dyn Reporter,
-) -> Result<RecordStream<TcpStream>> {
+) -> Result<RecordStream<ControlledStream>> {
     server_negotiate(&mut stream, secure)?;
     if !secure {
         return Ok(RecordStream::new(stream, Role::Server, None, None));

@@ -171,11 +171,13 @@ impl Desktop {
         inputs[5].update(cx, |i, cx| i.set("::".into(), cx));
         let mut subscriptions = vec![];
         for input in &inputs {
-            subscriptions.push(cx.observe(input, |this, _, cx| {
-                this.revision = this.revision.wrapping_add(1);
-                this.preview_revision = None;
-                cx.notify();
-            }));
+            subscriptions.push(
+                cx.subscribe(input, |this, _, _: &input::ContentChanged, cx| {
+                    this.revision = this.revision.wrapping_add(1);
+                    this.preview_revision = None;
+                    cx.notify();
+                }),
+            );
         }
         let (tx, messages) = mpsc::sync_channel(64);
         let stop = Arc::new(AtomicBool::new(false));
@@ -1524,6 +1526,32 @@ mod tests {
             peer: "127.0.0.1:9000".parse().unwrap(),
             peer_version: Some(xfer::VERSION.into()),
         }
+    }
+    #[gpui::test]
+    fn focus_and_cursor_notifications_preserve_reviewed_preview(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| Desktop::new(None, cx));
+        view.update(cx, |this, cx| {
+            this.inputs[0].update(cx, |input, cx| input.set("folder".into(), cx));
+        });
+        cx.run_until_parked();
+        let revision = view.update(cx, |this, _| {
+            this.preview_revision = Some(this.revision);
+            this.revision
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.inputs[0].update(cx, |input, cx| {
+                    window.focus(&input.focus_handle(cx));
+                    input.set("folder".into(), cx);
+                    cx.notify();
+                });
+            });
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.revision, revision);
+            assert_eq!(this.preview_revision, Some(revision));
+        });
     }
     #[gpui::test]
     fn preview_completion_cannot_approve_changed_inputs(cx: &mut gpui::TestAppContext) {

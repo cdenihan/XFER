@@ -29,6 +29,10 @@ actions!(
     ]
 );
 
+pub struct ContentChanged;
+
+impl gpui::EventEmitter<ContentChanged> for TextInput {}
+
 pub struct TextInput {
     secret: bool,
     focus_handle: FocusHandle,
@@ -61,10 +65,14 @@ impl TextInput {
         self.content.to_string()
     }
     pub fn set(&mut self, value: String, cx: &mut Context<Self>) {
+        let changed = self.content.as_ref() != value;
         self.content = value.into();
         self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
         self.selection_reversed = false;
+        if changed {
+            cx.emit(ContentChanged);
+        }
         cx.notify();
     }
 
@@ -338,12 +346,16 @@ impl EntityInputHandler for TextInput {
         if self.content.len() - range.len() + new_text.len() > 8192 {
             return;
         }
+        let changed = &self.content[range.clone()] != new_text;
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range.take();
+        if changed {
+            cx.emit(ContentChanged);
+        }
         cx.notify();
     }
 
@@ -364,6 +376,7 @@ impl EntityInputHandler for TextInput {
         if self.content.len() - range.len() + new_text.len() > 8192 {
             return;
         }
+        let changed = &self.content[range.clone()] != new_text;
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
@@ -378,6 +391,9 @@ impl EntityInputHandler for TextInput {
             .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        if changed {
+            cx.emit(ContentChanged);
+        }
         cx.notify();
     }
 

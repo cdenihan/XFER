@@ -74,6 +74,55 @@ artifact_for() {
     esac
 }
 
+wget_download() {
+    request_url=$1
+    destination=$2
+    redirects=0
+    while [ "$redirects" -le 20 ]; do
+        headers=$(mktemp "${TMPDIR:-/tmp}/xfer-https.XXXXXX") || die "cannot create download headers file"
+        if wget --server-response --max-redirect=0 --tries=1 --timeout=30 \
+            -O "$destination" "$request_url" 2>"$headers"; then
+            rm -f "$headers"
+            return
+        fi
+        status=$(awk '/^  HTTP\// { status=$2 } END { print status }' "$headers")
+        location=$(awk '
+            /^  HTTP\// { location="" }
+            /^  [Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:/ {
+                sub(/^  [^:]*:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); location=$0
+            }
+            END { print location }
+        ' "$headers")
+        rm -f "$headers"
+        case "$status" in 301|302|303|307|308) ;; *) die "wget could not download $request_url" ;; esac
+        [ -n "$location" ] || die "HTTPS redirect has no Location header"
+        [ "$redirects" -lt 20 ] || die "too many HTTPS download redirects"
+        # Disable automatic redirects and validate every hop. --https-only only
+        # restricts recursive links in GNU wget; it does not protect this flow.
+        case "$location" in
+            *\\*) die "invalid HTTPS redirect location" ;;
+        esac
+        if printf '%s' "$location" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+            die "invalid HTTPS redirect location"
+        fi
+        authority=${request_url#https://}
+        authority=${authority%%/*}
+        case "$location" in
+            https://*) request_url=$location ;;
+            //*) request_url="https:$location" ;;
+            /*) request_url="https://$authority$location" ;;
+            *:*) die "refusing a non-HTTPS download redirect" ;;
+            \?*|\#*) request_url="${request_url%%\?*}$location" ;;
+            *)
+                parent=${request_url%/*}
+                [ "$parent" != 'https:/' ] || parent="https://$authority"
+                request_url="$parent/$location"
+                ;;
+        esac
+        redirects=$((redirects + 1))
+    done
+}
+
 download_file() {
     url=$1
     destination=$2
@@ -89,7 +138,7 @@ download_file() {
         return
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -q -O "$destination" "$url"
+        wget_download "$url" "$destination"
         return
     fi
     die "curl or wget is required"

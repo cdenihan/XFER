@@ -1,7 +1,7 @@
 //! Incremental directory updates. Only verified changed files are replaced;
 //! destination-only files and identical files remain untouched.
 use crate::{
-    control::TransferControl,
+    control::{ControlledStream, TransferControl},
     crypto::update_manifest,
     delta::{self, BasisHeader, Instruction, Signature, SyncStats},
     error::{Result, XferError},
@@ -21,7 +21,6 @@ use std::os::unix::fs::MetadataExt;
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
-    net::TcpStream,
     path::{Path, PathBuf},
 };
 
@@ -56,7 +55,7 @@ pub(crate) fn hash_file(file: &mut File, control: &TransferControl) -> Result<[u
 }
 
 pub(crate) fn send(
-    session: &mut RecordStream<TcpStream>,
+    session: &mut RecordStream<ControlledStream>,
     plan: &TransferPlan,
     options: &SendOptions,
     reporter: &dyn Reporter,
@@ -291,7 +290,7 @@ pub(crate) fn destination(options: &ReceiveOptions, root_name: &str) -> Result<P
 }
 
 pub(crate) fn receive(
-    session: &mut RecordStream<TcpStream>,
+    session: &mut RecordStream<ControlledStream>,
     offer: Offer,
     options: &ReceiveOptions,
     preview: bool,

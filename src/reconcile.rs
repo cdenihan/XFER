@@ -3,7 +3,7 @@
 //! machines and are reported for an explicit user resolution.
 use crate::secure_store::{LockedJsonStore, SecureDir};
 use crate::{
-    control::TransferControl,
+    control::{ControlledStream, TransferControl},
     delta::SyncStats,
     error::{Result, XferError},
     filesystem::{
@@ -19,7 +19,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    net::TcpStream,
     path::Path,
     time::Duration,
 };
@@ -158,7 +157,7 @@ fn add(a: SyncStats, b: SyncStats) -> SyncStats {
 }
 
 pub(crate) fn send(
-    session: &mut RecordStream<TcpStream>,
+    session: &mut RecordStream<ControlledStream>,
     plan: &TransferPlan,
     options: &SendOptions,
     reporter: &dyn Reporter,
@@ -370,7 +369,7 @@ pub(crate) fn send(
 }
 
 pub(crate) fn receive(
-    session: &mut RecordStream<TcpStream>,
+    session: &mut RecordStream<ControlledStream>,
     offer: Offer,
     options: &ReceiveOptions,
     preview: bool,
