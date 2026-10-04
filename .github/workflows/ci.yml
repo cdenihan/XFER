@@ -1,27 +1,49 @@
 name: CI
-
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-  checks: write
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  shared:
-    permissions:
-      contents: read
-      checks: write
-    uses: ./.github/workflows/rust-ci.yml
-    with:
-      binary-name: xfer
-      display-name: XFER
-      environment-prefix: XFER
-    secrets:
-      dependency_token: ${{ secrets.RUST_CLI_TOOLKIT_TOKEN }}
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: zig fmt --check build.zig src
+      - run: zig build test
+      - run: zig build -Doptimize=ReleaseSafe
+      - name: Network integration
+        shell: bash
+        run: python tests/integration.py zig-out/bin/xfer${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Browser workflow integration
+        shell: bash
+        run: python tests/desktop.py zig-out/bin/xfer${{ runner.os == 'Windows' && '.exe' || '' }}
+  cross:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-linux-musl, aarch64-linux-musl, x86_64-macos, aarch64-macos, x86_64-windows, aarch64-windows]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe

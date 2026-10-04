@@ -1,27 +1,31 @@
-name: Prepare Release
-
+name: Release
 on:
   push:
-    branches: [main]
-
+    tags: ['v*']
 permissions:
-  actions: write
   contents: write
-
-concurrency:
-  group: prepare-release-main
-  cancel-in-progress: false
-
 jobs:
-  prepare:
-    uses: cdenihan/rust-cli-toolkit/.github/workflows/prepare-release.yml@v2.0.0
-    with:
-      binary-name: xfer
-      display-name: XFER
-      cargo-package: xfer
-      environment-prefix: XFER
-      version-mode: calendar
-      version-file: VERSION
-      publish-workflow: publish-release.yml
-    secrets:
-      dependency_token: ${{ secrets.RUST_CLI_TOOLKIT_TOKEN }}
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+  package:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Check tag and package all targets
+        run: |
+          test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+          python scripts/package.py
+      - name: Publish verified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "dist/$(cat VERSION)/"* --verify-tag --title "XFER $GITHUB_REF_NAME" --generate-notes

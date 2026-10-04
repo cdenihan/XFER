@@ -1,96 +1,120 @@
-# Security policy
+# Security
 
-## Supported version
+## Reporting
 
-Security fixes are made in the latest date-based release.
+Report vulnerabilities privately through the repository's GitHub security
+advisory channel. Include the XFER/compiler version, OS, reproducer and impact.
+Avoid including real shared secrets or private transferred files.
 
-## Reporting a vulnerability
+## Trust model
 
-Please use GitHub's private vulnerability reporting feature for this repository.
-Do not open a public issue for a suspected vulnerability that could place users
-or transferred data at risk.
+XFER is for direct sharing over a reachable IP network. Network attackers may
+observe, alter, replay or inject packets. Discovery labels and source addresses
+are untrusted suggestions, not identities. No cloud service or certificate
+issuer participates in a transfer.
 
-Include the affected version, platform, reproduction steps, expected impact, and
-any proof-of-concept material that is safe to share.
+Without a shared secret, **both people must compare the full 48-bit session
+code through a trusted channel and approve**. Clicking yes without comparison
+does not authenticate the other computer. Each connection has a fresh code;
+XFER keeps no permanent identity or remembered-peer database.
 
-## Threat model
+With `XFER_TOKEN`, knowledge of the same strong random secret authenticates the
+encrypted record exchange. `--yes` additionally grants consent for every offered
+item within the receiver's limits. The token must be at least 16 bytes; use a
+cryptographically random 32-byte token encoded as hex. A captured transcript
+permits offline guesses of a weak token. This protocol is not a password-based
+key exchange. Secrets should be provided privately via the environment and are
+never written to configuration or events.
 
-XFER's secure mode is designed to protect transfer confidentiality and integrity
-against passive observers and active network attackers after the receiver
-identity has been authenticated.
+## Protocol protections
 
-On the first connection, users must compare the displayed short authentication
-string (SAS) on both machines. If they approve a mismatched code, TOFU cannot
-detect that first-connection interception. A previously pinned identity change
-is displayed as a high-severity warning and is never accepted automatically.
+Both peers commit to their ephemeral X25519 public keys and random nonces using
+SHA-256 before revealing them. The complete ordered handshake and token enter
+HKDF-SHA-256. Independently derived directional ChaCha20-Poly1305 keys protect
+record kinds and payloads; authenticated length and implicit sequence counters
+bind framing, order and direction. Bad commitments, invalid X25519 points,
+mismatched token mode, failed tags, oversized records and unexpected message
+kinds abort the session. No insecure fallback exists.
 
-The optional shared token is mixed into HKDF input. It adds a possession factor
-and causes the encrypted readiness exchange to fail when tokens differ. It does
-not replace SAS comparison or identity pinning.
+The offered metadata is encrypted, but is exchanged **before human code
+verification** so the recipient can review the offer. It includes paths, sizes
+and SHA-256 file digests. An active intermediary may therefore learn that
+metadata before being rejected. File contents are withheld until both peers
+approve. Ordinary passive listeners cannot read metadata or content.
 
-## Cryptography
+Hashes protect every file and the exact offered manifest. Changes during source
+streaming abort the session. Receive staging is on the destination filesystem
+and publication uses a nonreplacing atomic rename. Verified data becomes visible
+as a complete item. Success on the sender requires an authenticated publication
+acknowledgement; losing that acknowledgement can leave the sender uncertain
+although the item was delivered.
 
-- Receiver identity: static X25519 key, generated with the operating system CSPRNG
-- Sender key: ephemeral X25519 key per connection
-- Key derivation: HKDF-SHA-256
-- Record encryption: ChaCha20-Poly1305
-- Nonces: independent random session material plus directional monotonic sequence numbers
-- File verification: SHA-256 per file
-- Transfer verification: SHA-256 manifest over ordered paths and file digests
+## Filesystem protections
 
-Protocol headers are authenticated as AEAD associated data. Record sequence
-numbers must be exactly monotonic, preventing deletion, reordering, or replay
-inside a session.
+Validation rejects absolute/traversing paths, empty components, backslashes,
+Windows device names, alternate streams, controls, trailing dots/spaces and
+ASCII case aliases. A manifest declares exactly one root with existing
+parent-before-child directory entries and exact byte totals. Unicode aliases
+that collide on the destination fail exclusive creation, rather than merge or
+replace. Directory handles are traversed component by component without
+following symlinks. Sources containing symlinks or special files skip them.
 
-The identity file and peer store use private Unix permissions when applicable.
-XFER cannot protect secrets after the local account or either endpoint is
-compromised.
+Unix staging directories are 0700 and files are 0600. Windows inherits the
+destination's ACLs; choose a private destination directory. Another process
+running as the same OS user or an administrator is outside this threat model.
+Malicious transferred file contents remain malicious; XFER verifies bytes and
+does not open, execute or scan received files.
 
-## LAN discovery
+## Browser control surface
 
-While a discoverable receiver is waiting, it sends a small XFER presence
-announcement every two seconds to the administratively scoped IPv4 multicast
-address `239.255.90.90:39090` with TTL 1. Senders listen to that group and do
-not enumerate subnets, probe hosts, scan ports, or attempt connections until the
-user starts a transfer. `xfer receive --no-discovery` disables announcements.
+The browser server binds only to `127.0.0.1` on a random port, separate from the
+LAN transfer listener. A fresh 256-bit capability starts in the launch URL's
+fragment, is removed from the address bar, and is retained in same-origin
+sessionStorage for reloads. Every API request requires its bearer header. Exact
+Host validation rejects DNS rebinding; Origin, when present, must be the same
+loopback origin. No CORS access is granted. CSP permits only embedded,
+same-origin script/style assets and disallows framing. Third-party webpages
+cannot upload, approve transfers, change state, or quit the app.
 
-Discovery packets are intentionally unauthenticated and contain only the
-machine label, transfer port, protocol version, and security-mode flag. Treat
-the discovered name and address as advisory: the secure transfer handshake, SAS
-comparison, and pinned receiver identity remain authoritative. A malicious LAN
-peer can spoof or suppress discovery but cannot bypass those checks.
+Only user-selected browser files enter a private temporary upload tree; the
+control API exposes no arbitrary-file read or command execution endpoint.
+Upload paths receive the same portable traversal validation as transfer paths.
+Approval binds to the current request identifier and the exact current code.
+The UI asks the person to confirm a code comparison; knowledge of the browser
+capability or token does not cause implicit approval. Received files are never
+opened automatically. A local process running as the same user is outside the
+threat model, and can access the browser capability or selected bytes.
 
-## Release installers
+HTTP headers are bounded to 16 KiB, JSON requests to 8 KiB, simultaneous browser
+connections to 16, and each request to five minutes. The selection uses the
+configured transfer byte limit and finite entry/path caps. Cancellation shuts
+down a blocked upload socket and removes its temporary tree. As with receive
+staging, force-quitting may leave `xfer-upload-*` in the OS temporary directory.
+Browser selection makes a local temporary copy; direct CLI sources do not.
 
-Official installers select only a named supported release artifact, download
-the adjacent SHA-256 file, verify it before execution, and stage replacement in
-the destination directory. Checksum, download, compatibility, or write failures
-leave an existing installation unchanged. Network release URLs must use HTTPS;
-`file://` is accepted only to support offline mirrors and installer tests.
+## Resource limits and failure behavior
 
-## Filesystem safety
+Each record carries at most 64 KiB of payload. The encoded manifest is capped
+at 16 MiB and 100,000 entries; paths are limited to 4096 bytes, 64 components,
+and names to 255 UTF-8 bytes. The default payload cap is 16 GiB per item.
+Discovery collects at most 64 receivers and runs for three seconds. Queries
+contain a fresh nonce; replies must echo it and use their packet source as the
+endpoint. Receiver replies are rate-limited to one per 20 ms.
 
-Incoming names are constrained to relative normal path components. Absolute
-paths, parent traversal, duplicate or case-colliding entries, and non-portable
-platform names are rejected. Data is written under a fresh staging directory
-inside the requested output directory, verified, synced, and then renamed into
-place.
+Connections have a 10-second timeout; handshake reads allow 15 seconds.
+Record headers allow up to 300 seconds for consent/idle time, record bodies
+60 seconds, writes 300 seconds. Metadata has a two-minute deadline, consent a five-minute deadline, and the
+transfer phase a 24-hour deadline. Every record operation is also capped by its
+phase deadline. Terminal consent expires after five minutes. A receiver serves
+one session at a time. Untrusted LAN clients can occupy that session until its
+timeout or prompt is canceled; firewall restrictions and a shared secret reduce
+exposure but do not eliminate denial of service.
 
-Symlinks are not created by the receiver. Sender symlinks are skipped unless
-`--follow-links` is set, and followed targets must remain inside the source root.
+Network failures clean up private staging. Process termination or power loss can
+leave hidden staging directories that must be removed manually after stopping
+XFER. Per-file sync plus atomic rename does not guarantee crash durability on
+every filesystem. Received metadata/permissions are not reproduced.
 
-## Insecure mode
-
-`--insecure` disables confidentiality, record authentication, SAS, and identity
-pinning. SHA-256 still catches accidental corruption, but it is not meaningful
-against an active attacker who can replace both content and hashes.
-
-## Sync access
-
-`receive --sync` explicitly permits incremental overwrites and two-way reads
-within the selected child folder of the output directory. Receiver identity
-pinning authenticates the receiver, not the connecting client. Use a shared
-token to restrict who can use a reachable sync receiver. Sync rejects symlink
-targets, verifies reused blocks and reconstructed files, and stages each changed
-file beside its destination before publication. Earlier completed files remain
-if a later file fails. Preview does not write synced data or comparison history.
+This is a new protocol implementation, not an independently audited product.
+The automated tests verify concrete failure cases; they do not prove the
+absence of vulnerabilities.

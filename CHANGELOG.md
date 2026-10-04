@@ -1,74 +1,24 @@
 # Changelog
 
-All notable changes to XFER are documented here.
+## 1.0.0 — Zig redesign
 
-## Unreleased
-
-### Fixed
-
-- Allow manual approval of changed receiver identities while still rejecting
-  concurrent conflicting changes to the peer store.
-- Support sending `.` and `..`, and validate exclusion globs for file inputs.
-- Cancel waiting and active TUI transfers and return to the form for retries.
-- Stop LAN advertisements once the receiver accepts a connection.
-- Reject excess byte/file totals before reading file data and reject ambiguous
-  wire paths, including case-colliding ancestor directories.
-- Preserve destination naming and overwrite behavior around dangling symlinks.
-- Detect source files growing or shrinking while sending.
-- Validate dry-run security options, zero connection timeouts, and TUI ports.
-
-### Changed
-
-- Redesigned the TUI around action, folder, computer, review, and result screens;
-  Send and Receive are consecutive items in a vertical list. Added preview/apply sync and conflict choices.
-- Incremented the wire protocol to v5; both endpoints require the new build.
-
-- Replaced the nested receiving loop with a state machine that separates frame
-  validation, file verification, and final publication. Invalid frames make the
-  transfer permanently unpublishable.
-- Added a storage transaction layer that chooses collision names at publication
-  time and cleans staging on failure, including when a file is still open.
-- Bounded incoming path depth, length, entry count, and retained path metadata.
-
-- Rewrote the application as a maintainable library-first Rust project.
-- Replaced the multi-port protocol with one typed, ordered TCP record stream.
-- Replaced the placeholder terminal workflow with a Ratatui interface.
-- Redesigned the clap CLI and intentionally removed v3 wire compatibility.
-- Reused encrypted record buffers and throttled progress updates on the bulk
-  data path.
-
-### Security
-
-- Added X25519, HKDF-SHA-256, and ChaCha20-Poly1305 secure sessions.
-- Added an encrypted readiness check before TOFU identity persistence.
-- Added sequence-authenticated records, safe path validation, duplicate-entry
-  rejection, atomic staging, and per-file plus manifest verification.
-- Added optional shared-token key hardening.
-
-### Added
-
-- Dependency-free incremental block matching using existing checksum primitives.
-- One-way and two-way folder sync, persistent comparison history, conflict
-  preservation and explicit preferences, and read-only network previews.
-- Persistent sync receiving, workflow recall, and zero-data unchanged-file skips.
-
-- IPv4/IPv6 support, exclusion globs, safe symlink following, dry-run planning,
-  JSON events, peer management, diagnostics, shell completions, collision-safe
-  receive names, and explicit overwrite behavior.
-- TTL-1 same-LAN receiver discovery, multi-machine selection, and receiver IP
-  display in the TUI without subnet or port scanning.
-- Checksum-verifying, atomic installers for Linux GNU/musl, macOS, and Windows
-  across every supported x86_64 and ARM64 release target.
-- Extensive unit, CLI subprocess, installer, secure loopback, protocol
-  rejection, filesystem-safety, and directory-transfer tests.
-- Native and cross-platform CI without duplicate push/PR runs.
-- Date-based release automation for every push to `main`, with a sequential
-  per-day suffix and the release version compiled into the CLI.
-- A checksum-verifying `xfer update` command that replaces the currently
-  installed executable with the latest official release or a specifically
-  pinned release.
-- Compatible release-version exchange during transfers, with mismatch warnings
-  and an interactive update offer on the older CLI.
-- Bot-authored release commits that synchronize the public `VERSION` value with
-  SemVer-compatible `Cargo.toml` and `Cargo.lock` versions before building,
-  tagging, and publishing each release.
+- Initialized a new project with `zig init` using Zig 0.17.0.
+- Replaced the Rust application and all runtime dependencies with Zig.
+- Launch a browser sharing window with drag-and-drop, file/folder pickers, nearby
+  computers, progress, cancellation, and incoming code-confirmation prompts.
+- Keep a terminal menu and scriptable CLI using the same encrypted transfer core.
+- Isolate browser controls on a capability-protected loopback listener; embed all
+  UI assets without additional runtime packages.
+- Added nonce-bound IPv4 broadcast discovery and direct IPv4/IPv6 connections.
+- Introduced a committed ephemeral X25519 handshake, HKDF-SHA-256 directional
+  keys, human comparison codes, and ChaCha20-Poly1305 authenticated records.
+- Require explicit consent on both devices; unattended approval requires a
+  strong environment-provided shared secret.
+- Verify each file and the complete offered manifest before atomic publication.
+- Preserve existing destinations and clean up staging after network failures.
+- Added unit and real process/network integration tests, native CI on Windows,
+  macOS and Linux, six cross-build targets, and checksumed release archives.
+- Added reproducible Rust/Zig LAN benchmarks against the requested Linux host.
+- Removed old protocol compatibility, sync/delta/reconciliation commands,
+  remembered-peer configuration, self-update, Rust toolkit release integration,
+  and the previous terminal framework.

@@ -1,0 +1,249 @@
+{
+  "remote": "cdenihan@192.168.86.150",
+  "direction": "Linux ARM64 sender to macOS ARM64 receiver over direct LAN TCP",
+  "local_address": "192.168.86.39",
+  "rust_release": "v2026.09.06.1",
+  "rust_commit": "6214e213f392d6281455a3d3f24988012c6ee596",
+  "zig_build": "ReleaseSafe",
+  "receiver_platform": "macOS-27.0.1-arm64-arm-64bit",
+  "binaries": {
+    "rust": {
+      "sender": {
+        "version": "xfer 2026.09.06.1",
+        "binary_bytes": 3289632,
+        "binary_sha256": "2b8c81794e96cee1d37b7e29c4d3f08274c2708a6a9b6fcde11952e266025bfe"
+      },
+      "receiver": {
+        "binary_bytes": 3242416,
+        "binary_sha256": "2867d829032943b234a2942f34b619e8eee524b1eef96be3dd955655bd32259c"
+      }
+    },
+    "zig": {
+      "sender": {
+        "version": "xfer 1.0.0 (Zig 0.17.0, protocol XFERZ017)",
+        "binary_bytes": 5948728,
+        "binary_sha256": "32555e4d84639aeecfde96f45e2ac8078a4f242972d68677aaf1ed171bc25339"
+      },
+      "receiver": {
+        "binary_bytes": 1469640,
+        "binary_sha256": "7c0e8d0c7df6b4f0b41c47a09b1019a794bee57cd2067ff5d4044d9ebc5bcf90"
+      }
+    }
+  },
+  "zig_source_sha256": "0418eccdb56c645b5f75a53485d090d9ea725f7f01dfd8aeea046b0cb94df5d4",
+  "sender_platform": "Linux-7.0.0-1020-raspi-aarch64-with-glibc2.43",
+  "sender_cpu": "Raspberry Pi 4 Model B Rev 1.5",
+  "results": [
+    {
+      "dataset": "large-file",
+      "implementation": "rust",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 134217728,
+      "mib_s": 5.6230200495633005,
+      "receiver_cpu_s": 0.915235,
+      "verified": true,
+      "wall_s": 22.763568130962085,
+      "sender_cpu_s": 1.92576,
+      "sender_peak_rss_kib": 28152
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 134217728,
+      "mib_s": 5.48147518023045,
+      "receiver_cpu_s": 1.4451799999999997,
+      "verified": true,
+      "wall_s": 23.351378194987774,
+      "sender_cpu_s": 5.119604,
+      "sender_peak_rss_kib": 30452
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.3161671357119875,
+      "receiver_cpu_s": 1.4122950000000007,
+      "verified": true,
+      "wall_s": 24.077497327001765,
+      "sender_cpu_s": 5.567421,
+      "sender_peak_rss_kib": 30456
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "rust",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.724887750458535,
+      "receiver_cpu_s": 0.8281689999999999,
+      "verified": true,
+      "wall_s": 22.358516983978916,
+      "sender_cpu_s": 1.959233,
+      "sender_peak_rss_kib": 26900
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "rust",
+      "trial": 2,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 6.175066121376761,
+      "receiver_cpu_s": 0.7019639999999998,
+      "verified": true,
+      "wall_s": 20.728522980003618,
+      "sender_cpu_s": 1.8670579999999999,
+      "sender_peak_rss_kib": 26712
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 2,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.821357635228086,
+      "receiver_cpu_s": 1.153549,
+      "verified": true,
+      "wall_s": 21.98799799301196,
+      "sender_cpu_s": 5.230976,
+      "sender_peak_rss_kib": 29056
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.744923438437261,
+      "receiver_cpu_s": 1.260674999999999,
+      "verified": true,
+      "wall_s": 22.28054061497096,
+      "sender_cpu_s": 4.984598,
+      "sender_peak_rss_kib": 30736
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "rust",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 6.265533444118473,
+      "receiver_cpu_s": 0.6858990000000009,
+      "verified": true,
+      "wall_s": 20.42922620102763,
+      "sender_cpu_s": 1.982805,
+      "sender_peak_rss_kib": 27564
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 4096000,
+      "mib_s": 0.7623472027069829,
+      "receiver_cpu_s": 0.8932049999999983,
+      "verified": true,
+      "wall_s": 5.123977612995077,
+      "sender_cpu_s": 0.169965,
+      "sender_peak_rss_kib": 27568
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 4096000,
+      "mib_s": 4.482344095153445,
+      "receiver_cpu_s": 0.2286230000000007,
+      "verified": true,
+      "wall_s": 0.8714748169877566,
+      "sender_cpu_s": 0.324513,
+      "sender_peak_rss_kib": 30104
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 4.497835842987871,
+      "receiver_cpu_s": 0.23638599999999954,
+      "verified": true,
+      "wall_s": 0.8684732249821536,
+      "sender_cpu_s": 0.32298699999999997,
+      "sender_peak_rss_kib": 30716
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 0.7552201536781619,
+      "receiver_cpu_s": 0.8910810000000007,
+      "verified": true,
+      "wall_s": 5.17233283695532,
+      "sender_cpu_s": 0.16897800000000002,
+      "sender_peak_rss_kib": 27008
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 2,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 0.747606674382913,
+      "receiver_cpu_s": 0.8370689999999987,
+      "verified": true,
+      "wall_s": 5.2250068570137955,
+      "sender_cpu_s": 0.17390699999999998,
+      "sender_peak_rss_kib": 26556
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 2,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 4.441862471597642,
+      "receiver_cpu_s": 0.256711000000001,
+      "verified": true,
+      "wall_s": 0.8794171420158818,
+      "sender_cpu_s": 0.307383,
+      "sender_peak_rss_kib": 30824
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 2.9817516918944986,
+      "receiver_cpu_s": 0.25090199999999907,
+      "verified": true,
+      "wall_s": 1.3100520779844373,
+      "sender_cpu_s": 0.36239199999999994,
+      "sender_peak_rss_kib": 29100
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 0.7856434354685843,
+      "receiver_cpu_s": 0.8337059999999994,
+      "verified": true,
+      "wall_s": 4.972039252985269,
+      "sender_cpu_s": 0.16928999999999997,
+      "sender_peak_rss_kib": 28056
+    }
+  ],
+  "zig_final_source_sha256": "b4e3b94465d2127b3b9c37bcde5366904f7a7fb67d5d8f44c9cf2e9bb47aa624",
+  "zig_transfer_source_sha256": "d3605a83a650d0d3815243d0f1555489da9d0e17c2805623dabd668dad5b92cb",
+  "zig_source_note": "Only whitespace formatting of embedded HTML/CSS/JavaScript changed after the benchmark build; all Zig source, build configuration, and transfer behavior are unchanged."
+}

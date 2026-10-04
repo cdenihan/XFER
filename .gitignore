@@ -1,4 +1,8 @@
-/target/
-/dist/
+.zig-cache/
+zig-out/
+dist/
+# Build artifacts from the previous implementation.
+target/
 *.part
 .DS_Store
+__pycache__/
