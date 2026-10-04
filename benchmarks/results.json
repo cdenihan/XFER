@@ -21,16 +21,16 @@
     "zig": {
       "sender": {
         "version": "xfer 1.0.0 (Zig 0.17.0, protocol XFERZ017)",
-        "binary_bytes": 5948728,
-        "binary_sha256": "32555e4d84639aeecfde96f45e2ac8078a4f242972d68677aaf1ed171bc25339"
+        "binary_bytes": 5972136,
+        "binary_sha256": "18f6360de05abdaedb48a8f712ceb739c7513dec2b0e37d4b94dd80ac2f47e56"
       },
       "receiver": {
-        "binary_bytes": 1469640,
-        "binary_sha256": "7c0e8d0c7df6b4f0b41c47a09b1019a794bee57cd2067ff5d4044d9ebc5bcf90"
+        "binary_bytes": 1470552,
+        "binary_sha256": "f85ef1dd0f55019493acccdc984abff5c442d9a5a6c73dd86c60ed9e3be8513c"
       }
     }
   },
-  "zig_source_sha256": "0418eccdb56c645b5f75a53485d090d9ea725f7f01dfd8aeea046b0cb94df5d4",
+  "zig_source_sha256": "db8a66ac3f76a3effdffb888dc57c78252ea33b2e163d0f2a203f6597eb868a1",
   "sender_platform": "Linux-7.0.0-1020-raspi-aarch64-with-glibc2.43",
   "sender_cpu": "Raspberry Pi 4 Model B Rev 1.5",
   "results": [
@@ -40,12 +40,12 @@
       "trial": 0,
       "warmup": true,
       "bytes": 134217728,
-      "mib_s": 5.6230200495633005,
-      "receiver_cpu_s": 0.915235,
+      "mib_s": 6.179351449816321,
+      "receiver_cpu_s": 0.9254110000000002,
       "verified": true,
-      "wall_s": 22.763568130962085,
-      "sender_cpu_s": 1.92576,
-      "sender_peak_rss_kib": 28152
+      "wall_s": 20.714147923048586,
+      "sender_cpu_s": 1.931686,
+      "sender_peak_rss_kib": 27760
     },
     {
       "dataset": "large-file",
@@ -53,11 +53,11 @@
       "trial": 0,
       "warmup": true,
       "bytes": 134217728,
-      "mib_s": 5.48147518023045,
-      "receiver_cpu_s": 1.4451799999999997,
+      "mib_s": 4.915084279200362,
+      "receiver_cpu_s": 1.552825,
       "verified": true,
-      "wall_s": 23.351378194987774,
-      "sender_cpu_s": 5.119604,
+      "wall_s": 26.042279791960027,
+      "sender_cpu_s": 6.100926,
       "sender_peak_rss_kib": 30452
     },
     {
@@ -66,12 +66,12 @@
       "trial": 1,
       "warmup": false,
       "bytes": 134217728,
-      "mib_s": 5.3161671357119875,
-      "receiver_cpu_s": 1.4122950000000007,
+      "mib_s": 5.712114543362516,
+      "receiver_cpu_s": 1.5377669999999994,
       "verified": true,
-      "wall_s": 24.077497327001765,
-      "sender_cpu_s": 5.567421,
-      "sender_peak_rss_kib": 30456
+      "wall_s": 22.408514225040562,
+      "sender_cpu_s": 5.651452,
+      "sender_peak_rss_kib": 29060
     },
     {
       "dataset": "large-file",
@@ -79,12 +79,12 @@
       "trial": 1,
       "warmup": false,
       "bytes": 134217728,
-      "mib_s": 5.724887750458535,
-      "receiver_cpu_s": 0.8281689999999999,
+      "mib_s": 5.640453496219136,
+      "receiver_cpu_s": 0.9552970000000007,
       "verified": true,
-      "wall_s": 22.358516983978916,
-      "sender_cpu_s": 1.959233,
-      "sender_peak_rss_kib": 26900
+      "wall_s": 22.693210765020922,
+      "sender_cpu_s": 1.902004,
+      "sender_peak_rss_kib": 26448
     },
     {
       "dataset": "large-file",
@@ -92,116 +92,116 @@
       "trial": 2,
       "warmup": false,
       "bytes": 134217728,
-      "mib_s": 6.175066121376761,
-      "receiver_cpu_s": 0.7019639999999998,
+      "mib_s": 6.169710973857447,
+      "receiver_cpu_s": 0.90231,
       "verified": true,
-      "wall_s": 20.728522980003618,
-      "sender_cpu_s": 1.8670579999999999,
-      "sender_peak_rss_kib": 26712
-    },
-    {
-      "dataset": "large-file",
-      "implementation": "zig",
-      "trial": 2,
-      "warmup": false,
-      "bytes": 134217728,
-      "mib_s": 5.821357635228086,
-      "receiver_cpu_s": 1.153549,
-      "verified": true,
-      "wall_s": 21.98799799301196,
-      "sender_cpu_s": 5.230976,
-      "sender_peak_rss_kib": 29056
-    },
-    {
-      "dataset": "large-file",
-      "implementation": "zig",
-      "trial": 3,
-      "warmup": false,
-      "bytes": 134217728,
-      "mib_s": 5.744923438437261,
-      "receiver_cpu_s": 1.260674999999999,
-      "verified": true,
-      "wall_s": 22.28054061497096,
-      "sender_cpu_s": 4.984598,
-      "sender_peak_rss_kib": 30736
-    },
-    {
-      "dataset": "large-file",
-      "implementation": "rust",
-      "trial": 3,
-      "warmup": false,
-      "bytes": 134217728,
-      "mib_s": 6.265533444118473,
-      "receiver_cpu_s": 0.6858990000000009,
-      "verified": true,
-      "wall_s": 20.42922620102763,
-      "sender_cpu_s": 1.982805,
-      "sender_peak_rss_kib": 27564
-    },
-    {
-      "dataset": "small-files",
-      "implementation": "rust",
-      "trial": 0,
-      "warmup": true,
-      "bytes": 4096000,
-      "mib_s": 0.7623472027069829,
-      "receiver_cpu_s": 0.8932049999999983,
-      "verified": true,
-      "wall_s": 5.123977612995077,
-      "sender_cpu_s": 0.169965,
-      "sender_peak_rss_kib": 27568
-    },
-    {
-      "dataset": "small-files",
-      "implementation": "zig",
-      "trial": 0,
-      "warmup": true,
-      "bytes": 4096000,
-      "mib_s": 4.482344095153445,
-      "receiver_cpu_s": 0.2286230000000007,
-      "verified": true,
-      "wall_s": 0.8714748169877566,
-      "sender_cpu_s": 0.324513,
-      "sender_peak_rss_kib": 30104
-    },
-    {
-      "dataset": "small-files",
-      "implementation": "zig",
-      "trial": 1,
-      "warmup": false,
-      "bytes": 4096000,
-      "mib_s": 4.497835842987871,
-      "receiver_cpu_s": 0.23638599999999954,
-      "verified": true,
-      "wall_s": 0.8684732249821536,
-      "sender_cpu_s": 0.32298699999999997,
-      "sender_peak_rss_kib": 30716
-    },
-    {
-      "dataset": "small-files",
-      "implementation": "rust",
-      "trial": 1,
-      "warmup": false,
-      "bytes": 4096000,
-      "mib_s": 0.7552201536781619,
-      "receiver_cpu_s": 0.8910810000000007,
-      "verified": true,
-      "wall_s": 5.17233283695532,
-      "sender_cpu_s": 0.16897800000000002,
+      "wall_s": 20.746514794998802,
+      "sender_cpu_s": 1.9121739999999998,
       "sender_peak_rss_kib": 27008
     },
     {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 2,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.8050077633681525,
+      "receiver_cpu_s": 1.5796300000000016,
+      "verified": true,
+      "wall_s": 22.049927445012145,
+      "sender_cpu_s": 5.633466,
+      "sender_peak_rss_kib": 29328
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "zig",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 5.743421680685611,
+      "receiver_cpu_s": 1.4886499999999998,
+      "verified": true,
+      "wall_s": 22.286366406013258,
+      "sender_cpu_s": 5.151414,
+      "sender_peak_rss_kib": 30732
+    },
+    {
+      "dataset": "large-file",
+      "implementation": "rust",
+      "trial": 3,
+      "warmup": false,
+      "bytes": 134217728,
+      "mib_s": 6.0848217019348745,
+      "receiver_cpu_s": 0.9435169999999999,
+      "verified": true,
+      "wall_s": 21.03594916500151,
+      "sender_cpu_s": 1.914088,
+      "sender_peak_rss_kib": 26452
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 4096000,
+      "mib_s": 0.7508958094219578,
+      "receiver_cpu_s": 0.8919449999999998,
+      "verified": true,
+      "wall_s": 5.202119856025092,
+      "sender_cpu_s": 0.16930299999999998,
+      "sender_peak_rss_kib": 27832
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 0,
+      "warmup": true,
+      "bytes": 4096000,
+      "mib_s": 4.607851468049577,
+      "receiver_cpu_s": 0.24560500000000118,
+      "verified": true,
+      "wall_s": 0.8477378290263005,
+      "sender_cpu_s": 0.297712,
+      "sender_peak_rss_kib": 30844
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "zig",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 4.039287993237834,
+      "receiver_cpu_s": 0.2603200000000001,
+      "verified": true,
+      "wall_s": 0.967063999036327,
+      "sender_cpu_s": 0.305841,
+      "sender_peak_rss_kib": 29144
+    },
+    {
+      "dataset": "small-files",
+      "implementation": "rust",
+      "trial": 1,
+      "warmup": false,
+      "bytes": 4096000,
+      "mib_s": 0.7672220126664041,
+      "receiver_cpu_s": 0.9106139999999998,
+      "verified": true,
+      "wall_s": 5.091420652053785,
+      "sender_cpu_s": 0.175608,
+      "sender_peak_rss_kib": 28280
+    },
+    {
       "dataset": "small-files",
       "implementation": "rust",
       "trial": 2,
       "warmup": false,
       "bytes": 4096000,
-      "mib_s": 0.747606674382913,
-      "receiver_cpu_s": 0.8370689999999987,
+      "mib_s": 0.7782914511391469,
+      "receiver_cpu_s": 0.8725649999999998,
       "verified": true,
-      "wall_s": 5.2250068570137955,
-      "sender_cpu_s": 0.17390699999999998,
-      "sender_peak_rss_kib": 26556
+      "wall_s": 5.019006689952221,
+      "sender_cpu_s": 0.17988699999999996,
+      "sender_peak_rss_kib": 26592
     },
     {
       "dataset": "small-files",
@@ -209,12 +209,12 @@
       "trial": 2,
       "warmup": false,
       "bytes": 4096000,
-      "mib_s": 4.441862471597642,
-      "receiver_cpu_s": 0.256711000000001,
+      "mib_s": 4.291856759011295,
+      "receiver_cpu_s": 0.2538739999999997,
       "verified": true,
-      "wall_s": 0.8794171420158818,
-      "sender_cpu_s": 0.307383,
-      "sender_peak_rss_kib": 30824
+      "wall_s": 0.9101538609829731,
+      "sender_cpu_s": 0.336864,
+      "sender_peak_rss_kib": 30512
     },
     {
       "dataset": "small-files",
@@ -222,12 +222,12 @@
       "trial": 3,
       "warmup": false,
       "bytes": 4096000,
-      "mib_s": 2.9817516918944986,
-      "receiver_cpu_s": 0.25090199999999907,
+      "mib_s": 4.255483829532197,
+      "receiver_cpu_s": 0.26754000000000033,
       "verified": true,
-      "wall_s": 1.3100520779844373,
-      "sender_cpu_s": 0.36239199999999994,
-      "sender_peak_rss_kib": 29100
+      "wall_s": 0.9179332260391675,
+      "sender_cpu_s": 0.351816,
+      "sender_peak_rss_kib": 30996
     },
     {
       "dataset": "small-files",
@@ -235,16 +235,12 @@
       "trial": 3,
       "warmup": false,
       "bytes": 4096000,
-      "mib_s": 0.7856434354685843,
-      "receiver_cpu_s": 0.8337059999999994,
+      "mib_s": 0.7374973749871807,
+      "receiver_cpu_s": 0.9087569999999996,
       "verified": true,
-      "wall_s": 4.972039252985269,
-      "sender_cpu_s": 0.16928999999999997,
-      "sender_peak_rss_kib": 28056
+      "wall_s": 5.296629021991976,
+      "sender_cpu_s": 0.168574,
+      "sender_peak_rss_kib": 26396
     }
-  ],
-  "zig_final_source_sha256": "db8a66ac3f76a3effdffb888dc57c78252ea33b2e163d0f2a203f6597eb868a1",
-  "zig_transfer_source_sha256": "d3605a83a650d0d3815243d0f1555489da9d0e17c2805623dabd668dad5b92cb",
-  "zig_source_note": "After this measured build: UI whitespace formatting, Windows-only network deadline support, and explicit browser task cancellation/cleanup. A fresh benchmark of the completed implementation is being collected.",
-  "zig_final_core_source_sha256": "e37f4ea30b27b387bd18bada86a7fc9b68b3e1f4492ddb071ff70ddfb3af9f7d"
+  ]
 }

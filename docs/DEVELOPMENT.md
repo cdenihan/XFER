@@ -97,9 +97,11 @@ CI executes native tests on all three operating systems and cross-builds both
 x86-64 and ARM64 for each. Cross-compilation alone does not validate operating
 system behavior. The migration includes a real Linux ARM64 to macOS ARM64 Wi-Fi benchmark
 with independent hash verification; see [the report](../benchmarks/README.md).
-Platform firewall prompts, unusual destination filesystems, and native Windows
-execution still require the corresponding environments. Browser appearance and
-actual file-picker/code-confirmation controls were also checked locally.
+Native CI also verifies Windows CLI transfers and the browser control API.
+Platform firewall prompts, default-browser launch behavior on Windows/Linux,
+and unusual destination filesystems still need manual checks on those hosts.
+Browser appearance and actual file-picker/code-confirmation controls were
+checked locally on macOS.
 
 ## Release
 
