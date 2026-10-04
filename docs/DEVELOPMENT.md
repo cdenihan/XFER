@@ -32,6 +32,7 @@ permission to bind local TCP/UDP ports and uses isolated temporary directories.
 | `discovery.zig` | Nonce-bound UDP queries and source-address replies |
 | `manifest.zig` | Snapshot planning, streaming hashes, inventory validation |
 | `paths.zig` | Portable names and handle-relative no-follow traversal |
+| `net_io.zig` | Cancellable Windows network deadlines; native batching elsewhere |
 | `wire.zig` | Committed handshake, key derivation, encrypted records |
 | `transfer.zig` | Consent, streaming, staging and publication |
 | `root.zig` | Reusable library surface and test discovery |
@@ -53,8 +54,11 @@ cannot match the preapproved digest and is never published.
 The connection API in Zig 0.17's `Io.Threaded` backend panics when
 `ConnectOptions.timeout` is set. `transfer.connect` instead races a normal
 cancellable connection against a 10-second `Io.Select` timer. It cancels the
-loser and closes any stream returned by a losing connection. Record I/O uses
-`Io.operateTimeout`, which supports deadlines on the tested backend.
+loser and closes any stream returned by a losing connection. Windows also rejects network operations in `Io.Batch.awaitConcurrent` (used by
+`Io.operateTimeout`). `net_io.zig` races a normal cancellable network operation
+against its absolute deadline on Windows and joins canceled tasks before their
+buffers expire. macOS/Linux retain the native `Io.operateTimeout` path. UDP
+discovery uses the same adapter. These paths are covered by native network CI.
 
 The browser control listener uses a random loopback port and a 256-bit launch
 capability carried initially in the URL fragment, then in same-origin

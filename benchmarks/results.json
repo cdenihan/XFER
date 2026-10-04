@@ -243,7 +243,8 @@
       "sender_peak_rss_kib": 28056
     }
   ],
-  "zig_final_source_sha256": "b4e3b94465d2127b3b9c37bcde5366904f7a7fb67d5d8f44c9cf2e9bb47aa624",
+  "zig_final_source_sha256": "640c5547da1b720f6760139227b3a5c5e85a58ad137716a2713de62f51ca9f29",
   "zig_transfer_source_sha256": "d3605a83a650d0d3815243d0f1555489da9d0e17c2805623dabd668dad5b92cb",
-  "zig_source_note": "Only whitespace formatting of embedded HTML/CSS/JavaScript changed after the benchmark build; all Zig source, build configuration, and transfer behavior are unchanged."
+  "zig_source_note": "After the measured build: whitespace-only UI formatting and a Windows-only cancellable deadline adapter. The measured macOS/Linux network timeout path is unchanged; original measured binary hashes are retained.",
+  "zig_final_core_source_sha256": "e37f4ea30b27b387bd18bada86a7fc9b68b3e1f4492ddb071ff70ddfb3af9f7d"
 }

@@ -65,9 +65,11 @@ including process startup; it is not a standalone allocator benchmark.
 
 [results.json](results.json) records every trial, warm-ups, operating systems,
 source and binary hashes, binary sizes, throughput, CPU and verification.
-The UI assets received whitespace formatting after the measured build; the
-Zig transfer source and behavior did not change. Both the measured source hash
-and final formatted source hash are recorded.
+The UI assets received whitespace formatting after the measured build, and a
+Windows-only cancellable deadline adapter was added after native Windows CI
+exposed unsupported network batching. The measured macOS/Linux network path
+still uses the original native timed operations. Measured binary/source hashes
+and final source hashes are retained separately.
 The browser/CLI integration suites also passed natively on both macOS ARM64
 and this Linux ARM64 host.
 

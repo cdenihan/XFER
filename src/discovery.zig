@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const net_io = @import("net_io.zig");
 const paths = @import("paths.zig");
 const wire = @import("wire.zig");
 const query_magic = "XFERQ002";
@@ -30,7 +31,7 @@ fn serveInner(io: Io, socket: Io.net.Socket, port: u16, name: []const u8, instan
         const request = try socket.receive(io, &input);
         if (request.flags.trunc or request.data.len != 24 or !std.mem.eql(u8, request.data[0..8], query_magic)) continue;
         @memcpy(reply[8..24], request.data[8..24]);
-        socket.sendTimeout(io, &request.from, reply[0 .. 43 + name.len], wire.timeout(1)) catch |err| {
+        net_io.sendTimeout(socket, io, &request.from, reply[0 .. 43 + name.len], wire.timeout(1)) catch |err| {
             if (err == error.Canceled) return err;
         };
         // Bound amplification and CPU use from a noisy local host.
@@ -47,15 +48,15 @@ pub fn find(a: std.mem.Allocator, io: Io, port: u16) ![]Peer {
     try io.randomSecure(query[8..24]);
     const broadcast: Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 255, 255, 255, 255 }, .port = port } };
     const loopback: Io.net.IpAddress = .{ .ip4 = .loopback(port) };
-    try socket.sendTimeout(io, &loopback, &query, wire.timeout(1));
-    socket.sendTimeout(io, &broadcast, &query, wire.timeout(1)) catch |err| {
+    try net_io.sendTimeout(socket, io, &loopback, &query, wire.timeout(1));
+    net_io.sendTimeout(socket, io, &broadcast, &query, wire.timeout(1)) catch |err| {
         if (err == error.Canceled) return err;
     };
     const deadline = wire.timeout(3).toDeadline(io);
     var peers: std.ArrayList(Peer) = .empty;
     var buffer: [256]u8 = undefined;
     while (peers.items.len < max_peers) {
-        const reply = socket.receiveTimeout(io, &buffer, deadline) catch |err| switch (err) {
+        const reply = net_io.receiveTimeout(socket, io, &buffer, deadline) catch |err| switch (err) {
             error.Timeout => break,
             else => return err,
         };

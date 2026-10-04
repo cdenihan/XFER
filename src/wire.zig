@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const net_io = @import("net_io.zig");
 const X25519 = std.crypto.dh.X25519;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -23,7 +24,7 @@ fn readExact(stream: Io.net.Stream, io: Io, output: []u8, seconds: i64, limit: ?
     var offset: usize = 0;
     while (offset < output.len) {
         var data = [_][]u8{output[offset..]};
-        const result = try (try io.operateTimeout(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline)).net_read;
+        const result = try (try net_io.operateTimeout(io, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline)).net_read;
         if (result.data_len == 0) return error.EndOfStream;
         offset += result.data_len;
     }
@@ -33,7 +34,7 @@ fn writeAll(stream: Io.net.Stream, io: Io, input: []const u8, limit: ?Io.Clock.T
     var offset: usize = 0;
     while (offset < input.len) {
         const data = [_][]const u8{input[offset..]};
-        const n = try (try io.operateTimeout(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline)).net_write;
+        const n = try (try net_io.operateTimeout(io, .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline)).net_write;
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
