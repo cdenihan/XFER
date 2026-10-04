@@ -243,8 +243,8 @@
       "sender_peak_rss_kib": 28056
     }
   ],
-  "zig_final_source_sha256": "640c5547da1b720f6760139227b3a5c5e85a58ad137716a2713de62f51ca9f29",
+  "zig_final_source_sha256": "db8a66ac3f76a3effdffb888dc57c78252ea33b2e163d0f2a203f6597eb868a1",
   "zig_transfer_source_sha256": "d3605a83a650d0d3815243d0f1555489da9d0e17c2805623dabd668dad5b92cb",
-  "zig_source_note": "After the measured build: whitespace-only UI formatting and a Windows-only cancellable deadline adapter. The measured macOS/Linux network timeout path is unchanged; original measured binary hashes are retained.",
+  "zig_source_note": "After this measured build: UI whitespace formatting, Windows-only network deadline support, and explicit browser task cancellation/cleanup. A fresh benchmark of the completed implementation is being collected.",
   "zig_final_core_source_sha256": "e37f4ea30b27b387bd18bada86a7fc9b68b3e1f4492ddb071ff70ddfb3af9f7d"
 }

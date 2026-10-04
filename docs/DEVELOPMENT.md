@@ -72,8 +72,9 @@ an arbitrary source path to the server. One outgoing or incoming job runs at a
 time; the HTTP API remains responsive while transfer/approval/upload I/O waits.
 Application state is protected by `Io.Mutex`, and no response writes hold that
 mutex. `Io.Group` owns cancellable listener, discovery, HTTP, and transfer jobs.
-Shutdown cancels jobs before closing their sockets or freeing state. Ordinary
-cancellation removes both selected-file storage and receive staging. Discovery
+Shutdown cancels jobs before closing their sockets or freeing state. Explicit task cancellation wakes stalled reads on every platform; Windows
+socket shutdown alone does not reliably interrupt pending reads. Cleanup runs
+with cancellation blocked, removing selected-file storage and receive staging. Discovery
 uses a fresh instance identifier so a window does not offer itself as a peer.
 
 ## Verification

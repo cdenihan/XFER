@@ -140,7 +140,7 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
     const stage_name = try std.fmt.allocPrint(a, ".xfer-{s}.part", .{std.fmt.bytesToHex(random, .lower)});
     defer a.free(stage_name);
     try output.createDir(io, stage_name, privateDirPermissions());
-    defer output.deleteTree(io, stage_name) catch {};
+    defer cleanupStage(output, io, stage_name);
     const stage = try output.openDir(io, stage_name, .{ .follow_symlinks = false });
     defer stage.close(io);
     var received: u64 = 0;
@@ -220,6 +220,12 @@ fn collisionName(a: std.mem.Allocator, name: []const u8, number: usize) ![]u8 {
     var end = @min(name.len, 255 - suffix.len);
     while (end > 0 and !std.unicode.utf8ValidateSlice(name[0..end])) end -= 1;
     return std.fmt.allocPrint(a, "{s}{s}", .{ name[0..end], suffix });
+}
+fn cleanupStage(output: Io.Dir, io: Io, name: []const u8) void {
+    // User cancellation must still finish removing a partial transfer.
+    const previous = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(previous);
+    output.deleteTree(io, name) catch {};
 }
 fn privateDirPermissions() Io.File.Permissions {
     if (@import("builtin").os.tag == .windows) return .default_dir;

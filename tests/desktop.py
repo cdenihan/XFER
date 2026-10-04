@@ -117,10 +117,18 @@ def run():
             # The upload body is blocked; the state API and cancel must still work.
             assert sender.state()['busy']
             sender.request('/api/cancel', {})
-            sender.wait(lambda s: not s['busy'])
+            sender.wait(lambda s: not s['busy'], seconds=3)
             partial.close()
             assert not list(sender.root.glob('xfer-upload-*'))
             print('PASS browser capability, origin/host protection, traversal and blocked-upload cancellation')
+
+            idle = socket.create_connection(('127.0.0.1', receiver.port), timeout=5)
+            receiver.wait(lambda s: s['busy'])
+            receiver.request('/api/cancel', {})
+            receiver.wait(lambda s: not s['busy'], seconds=3)
+            idle.close()
+            assert not list(receiver.output.glob('.xfer-*.part'))
+            print('PASS browser cancellation wakes a stalled incoming handshake')
 
             content = os.urandom(2 * 1024 * 1024 + 97)
             sender.prepare('été', [('été/nested/photo.bin', content), ('été/empty.txt', b'')], ['été', 'été/empty-directory'])

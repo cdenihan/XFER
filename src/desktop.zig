@@ -19,7 +19,7 @@ const Upload = struct {
     total: u64 = 0,
     count: usize = 0,
     in_use: bool = false,
-    stream: ?Io.net.Stream = null,
+    abort: ?*Io.Event = null,
     canceled: bool = false,
 };
 const State = struct {
@@ -42,6 +42,7 @@ const State = struct {
     serial: u64 = 0,
     busy: bool = false,
     canceled: bool = false,
+    cancel_transfer: Io.Event = .unset,
     phase: []const u8 = "ready",
     message: [1024]u8 = undefined,
     message_len: usize = 0,
@@ -181,14 +182,15 @@ fn lanLoop(s: *State, server: *Io.net.Server) void {
         }
         s.busy = true;
         s.canceled = false;
+        s.cancel_transfer.reset();
         s.active = stream;
         s.bytes = 0;
         s.total = 0;
         s.setMessage("connecting", "An incoming transfer is connecting");
         s.mutex.unlock(s.io);
         s.workers.concurrent(s.io, incoming, .{ s, stream }) catch {
-            stream.close(s.io);
             s.finish(error.SystemResources);
+            stream.close(s.io);
         };
     }
 }
@@ -196,7 +198,7 @@ fn incoming(s: *State, stream: Io.net.Stream) void {
     defer stream.close(s.io);
     var arena: std.heap.ArenaAllocator = .init(s.gpa);
     defer arena.deinit();
-    s.finish(transfer.receive(arena.allocator(), s.io, stream, s.output, s.options()));
+    s.finish(cancellableTransfer(s, transfer.receive, .{ arena.allocator(), s.io, stream, s.output, s.options() }));
 }
 fn refreshPeers(s: *State) void {
     while (true) {
@@ -232,7 +234,19 @@ fn destroyUpload(s: *State, upload: *Upload) void {
 }
 fn sendJob(s: *State, upload: *Upload, host: []const u8) void {
     defer destroyUpload(s, upload);
-    s.finish(sendJobInner(s, upload, host));
+    s.finish(cancellableTransfer(s, sendJobInner, .{ s, upload, host }));
+}
+fn cancellableTransfer(s: *State, comptime task: anytype, args: anytype) !void {
+    const Result = union(enum) { done: anyerror!void, canceled: Io.Cancelable!void };
+    var results: [2]Result = undefined;
+    var select = Io.Select(Result).init(s.io, &results);
+    defer select.cancelDiscard();
+    try select.concurrent(.done, task, args);
+    try select.concurrent(.canceled, Io.Event.wait, .{ &s.cancel_transfer, s.io });
+    return switch (try select.await()) {
+        .done => |result| result,
+        .canceled => error.Canceled,
+    };
 }
 fn sendJobInner(s: *State, upload: *Upload, host: []const u8) !void {
     const a = upload.arena.allocator();
@@ -250,6 +264,12 @@ fn sendJobInner(s: *State, upload: *Upload, host: []const u8) !void {
     }
     s.active = stream;
     s.mutex.unlock(s.io);
+    defer {
+        // Remove the shared handle before closing it; cancel may run concurrently.
+        s.mutex.lockUncancelable(s.io);
+        s.active = null;
+        s.mutex.unlock(s.io);
+    }
     try transfer.send(a, s.io, stream, plan, s.options());
 }
 fn httpLoop(s: *State, server: *Io.net.Server) void {
@@ -271,12 +291,13 @@ fn httpConnection(s: *State, stream: Io.net.Stream) void {
         stream.close(s.io);
         _ = s.connections.fetchSub(1, .acq_rel);
     }
-    const Result = union(enum) { done: anyerror!void, timeout: Io.Cancelable!void };
+    const Result = union(enum) { done: anyerror!void, timeout: anyerror!void };
+    var abort: Io.Event = .unset;
     var results: [2]Result = undefined;
     var select = Io.Select(Result).init(s.io, &results);
     defer select.cancelDiscard();
-    select.concurrent(.done, httpInner, .{ s, stream }) catch return;
-    select.concurrent(.timeout, Io.sleep, .{ s.io, Io.Duration.fromSeconds(300), Io.Clock.awake }) catch return;
+    select.concurrent(.done, httpInner, .{ s, stream, &abort }) catch return;
+    select.concurrent(.timeout, Io.Event.waitTimeout, .{ &abort, s.io, wire.timeout(300) }) catch return;
     _ = select.await() catch return;
 }
 const response_headers = [_]std.http.Header{
@@ -287,7 +308,7 @@ const response_headers = [_]std.http.Header{
 fn reply(request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
     try request.respond(body, .{ .status = status, .keep_alive = false, .extra_headers = &response_headers });
 }
-fn httpInner(s: *State, stream: Io.net.Stream) !void {
+fn httpInner(s: *State, stream: Io.net.Stream, abort: *Io.Event) !void {
     var arena: std.heap.ArenaAllocator = .init(s.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -332,7 +353,9 @@ fn httpInner(s: *State, stream: Io.net.Stream) !void {
     }
     const expected = try std.fmt.allocPrint(a, "Bearer {s}", .{s.token});
     if (authorization == null or !std.mem.eql(u8, authorization.?, expected)) return reply(&request, .unauthorized, "{\"error\":\"Launch XFER to open this window\"}");
-    route(s, a, &request, upload_path, stream) catch |err| {
+    route(s, a, &request, upload_path, abort) catch |err| {
+        // Cancellation is terminal; responding could retry a stalled body read.
+        if (err == error.Canceled) return err;
         const body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = @errorName(err) }, .{});
         try reply(&request, .bad_request, body);
     };
@@ -344,7 +367,7 @@ fn jsonBody(comptime T: type, a: std.mem.Allocator, request: *std.http.Server.Re
     const body = try reader.allocRemaining(a, .limited(8192));
     return std.json.parseFromSlice(T, a, body, .{ .allocate = .alloc_always });
 }
-fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, path_header: ?[]const u8, stream: Io.net.Stream) !void {
+fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, path_header: ?[]const u8, abort: *Io.Event) !void {
     const target = try a.dupe(u8, request.head.target);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/api/state")) {
         const body = blk: {
@@ -375,6 +398,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
             try s.mutex.lock(s.io);
             defer s.mutex.unlock(s.io);
             s.canceled = true;
+            s.cancel_transfer.set(s.io);
             if (s.pending != null) {
                 s.decision = false;
                 s.decision_ready.set(s.io);
@@ -382,7 +406,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
             if (s.active) |active_stream| active_stream.shutdown(s.io, .both) catch {};
             if (s.upload) |upload| {
                 upload.canceled = true;
-                if (upload.stream) |upload_stream| upload_stream.shutdown(s.io, .both) catch {};
+                if (upload.abort) |upload_abort| upload_abort.set(s.io);
                 if (!upload.in_use) {
                     s.upload = null;
                     destroyUpload(s, upload);
@@ -424,6 +448,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
             s.upload = upload;
             s.busy = true;
             s.canceled = false;
+            s.cancel_transfer.reset();
             s.bytes = 0;
             s.total = body.value.total;
             s.setMessage("uploading", "Preparing selected files");
@@ -446,7 +471,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
         }
         return reply(request, .ok, "{}");
     }
-    if (std.mem.eql(u8, target, "/api/upload")) return uploadFile(s, a, request, path_header orelse return error.PathRequired, stream);
+    if (std.mem.eql(u8, target, "/api/upload")) return uploadFile(s, a, request, path_header orelse return error.PathRequired, abort);
     if (std.mem.eql(u8, target, "/api/send")) {
         const body = try jsonBody(struct { to: []const u8 }, a, request);
         defer body.deinit();
@@ -464,7 +489,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
     }
     return reply(request, .not_found, "{}");
 }
-fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, stream: Io.net.Stream) !void {
+fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, abort: *Io.Event) !void {
     const path = try decodePath(a, encoded);
     try paths.validate(path);
     const size = request.head.content_length orelse return error.LengthRequired;
@@ -480,13 +505,13 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
         return error.InvalidUpload;
     }
     upload.in_use = true;
-    upload.stream = stream;
+    upload.abort = abort;
     s.mutex.unlock(s.io);
     var succeeded = false;
     defer {
         s.mutex.lockUncancelable(s.io);
         upload.in_use = false;
-        upload.stream = null;
+        upload.abort = null;
         if (!succeeded or upload.canceled) {
             s.upload = null;
             s.busy = false;

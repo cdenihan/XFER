@@ -87,8 +87,8 @@ threat model, and can access the browser capability or selected bytes.
 
 HTTP headers are bounded to 16 KiB, JSON requests to 8 KiB, simultaneous browser
 connections to 16, and each request to five minutes. The selection uses the
-configured transfer byte limit and finite entry/path caps. Cancellation shuts
-down a blocked upload socket and removes its temporary tree. As with receive
+configured transfer byte limit and finite entry/path caps. Cancellation cancels
+the task performing a blocked upload and removes its temporary tree. As with receive
 staging, force-quitting may leave `xfer-upload-*` in the OS temporary directory.
 Browser selection makes a local temporary copy; direct CLI sources do not.
 
