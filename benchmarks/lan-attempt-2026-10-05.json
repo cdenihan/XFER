@@ -1,0 +1,45 @@
+{
+  "attempted_at": "2026-10-05T19:43:19.016247+00:00",
+  "zig_commit": "16eaf55683972d64c3461f309e220a0831f838fd",
+  "remote": "cdenihan@192.168.86.150",
+  "receiver_addresses": [
+    "192.168.86.39",
+    "100.89.89.20"
+  ],
+  "direction": "Raspberry Pi Linux ARM64 sender to Mac ARM64 receiver",
+  "successful_timed_transfers": 0,
+  "status": "No usable network session; historical LAN results retained",
+  "failures": [
+    {
+      "implementation": "rust",
+      "kind": "128 MiB warm-up and separate 4 KiB probe",
+      "destination": "192.168.86.39",
+      "error": "Resource temporarily unavailable (os error 11) during handshake after TCP connect"
+    },
+    {
+      "implementation": "zig",
+      "kind": "4 KiB probe",
+      "destination": "192.168.86.39",
+      "error": "Timeout while connecting"
+    },
+    {
+      "implementation": "zig",
+      "kind": "4 KiB probe",
+      "destination": "100.89.89.20",
+      "error": "Timeout while connecting"
+    }
+  ],
+  "passed_checks": [
+    "Mac loopback regression tests",
+    "Raspberry Pi loopback regression tests",
+    "Raspberry Pi broadcast discovery with specific IPv4 bind",
+    "Refreshed native and software-SHA Mac loopback benchmarks"
+  ],
+  "network_settings_changed": false,
+  "binaries": {
+    "rust_receiver": "2867d829032943b234a2942f34b619e8eee524b1eef96be3dd955655bd32259c",
+    "zig_receiver": "5523bd4a14a62dffa259c68caaf2f024457c61a31ce40f9580b75d746d17c163",
+    "rust_sender": "2b8c81794e96cee1d37b7e29c4d3f08274c2708a6a9b6fcde11952e266025bfe",
+    "zig_sender": "b1eb2a602dfa2b3a5ebd1210e215d1c1576d1cd7b1cad62a2c9f1d2f3b92f662"
+  }
+}

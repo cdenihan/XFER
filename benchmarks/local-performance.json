@@ -1,9 +1,10 @@
 {
+  "measured_at": "2026-10-05T19:36:16.874730+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit",
   "machine": "arm64",
   "binary_sha256": {
     "before": "f85ef1dd0f55019493acccdc984abff5c442d9a5a6c73dd86c60ed9e3be8513c",
-    "after": "166e7ea8270e6ffddc57e2d4111743c1f955ac4193c7ed6f864d3a8904ab73c9"
+    "after": "54a2b5ba45831171719e55d64c0a59d9ad2754737363551ab3d568fead70292a"
   },
   "scope": "loopback, warm filesystem cache; includes planning, encryption, sync and acknowledgement",
   "trials": [
@@ -11,155 +12,155 @@
       "dataset": "large",
       "binary": "before",
       "warmup": true,
-      "wall_s": 0.335660167
+      "wall_s": 0.328025417
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": true,
-      "wall_s": 0.276035417
+      "wall_s": 0.2766680829999999
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.27297516599999994
+      "wall_s": 0.2776528340000002
     },
     {
       "dataset": "large",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.3339296660000002
+      "wall_s": 0.324334208
     },
     {
       "dataset": "large",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.33008162500000005
+      "wall_s": 0.32434754200000016
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.27941174999999996
+      "wall_s": 0.27612391700000005
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.27602199999999977
+      "wall_s": 0.2764000839999996
     },
     {
       "dataset": "large",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.3296878750000003
+      "wall_s": 0.3233887499999999
     },
     {
       "dataset": "large",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.3269623749999999
+      "wall_s": 0.3228187499999997
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.28016799999999975
+      "wall_s": 0.2761565830000001
     },
     {
       "dataset": "large",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.27900770900000005
+      "wall_s": 0.27911441599999964
     },
     {
       "dataset": "large",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.33060033400000055
+      "wall_s": 0.3273365830000001
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": true,
-      "wall_s": 0.16852041699999987
+      "wall_s": 0.15994091700000013
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": true,
-      "wall_s": 0.13627445799999993
+      "wall_s": 0.13918470800000016
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.13640537499999983
+      "wall_s": 0.13689166700000044
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.16407600000000055
+      "wall_s": 0.15127441699999977
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.15652033400000054
+      "wall_s": 0.15655537499999994
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.14044566699999983
+      "wall_s": 0.13857125000000003
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.13992862500000047
+      "wall_s": 0.13815695799999972
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.1506546249999996
+      "wall_s": 0.15331962499999996
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.15169808300000032
+      "wall_s": 0.15216554099999957
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.13717012499999992
+      "wall_s": 0.1373340839999999
     },
     {
       "dataset": "small",
       "binary": "after",
       "warmup": false,
-      "wall_s": 0.13682429200000001
+      "wall_s": 0.1361045840000008
     },
     {
       "dataset": "small",
       "binary": "before",
       "warmup": false,
-      "wall_s": 0.15281495799999956
+      "wall_s": 0.16373245799999925
     }
   ],
   "medians_s": {
     "large": {
-      "before": 0.33008162500000005,
-      "after": 0.27900770900000005
+      "before": 0.324334208,
+      "after": 0.2764000839999996
     },
     "small": {
-      "before": 0.15281495799999956,
-      "after": 0.13717012499999992
+      "before": 0.15331962499999996,
+      "after": 0.1373340839999999
     }
   }
 }

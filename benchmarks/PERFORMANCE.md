@@ -1,7 +1,8 @@
 # Transfer performance investigation
 
 Measured on 2026-10-05 with Zig 0.17.0, ReleaseSafe, on an Apple ARM64 Mac.
-Baseline is commit `52223e4e84189bebd74b663dafa42e6218f7368f`.
+Baseline is commit `52223e4e84189bebd74b663dafa42e6218f7368f`; the refreshed
+after binaries include review fixes at `16eaf55683972d64c3461f309e220a0831f838fd`.
 
 ## Cause and change
 
@@ -46,12 +47,12 @@ and dataset. Lower wall time is better; the last column is time saved.
 
 | Build | Dataset | Before | After | Time saved |
 | --- | --- | ---: | ---: | ---: |
-| Native Apple ARM64 (SHA instructions) | 128 MiB random file | 0.3301 s | 0.2790 s | 15.5% |
-| Native Apple ARM64 (SHA instructions) | 1,000 × 4 KiB files | 0.1528 s | 0.1372 s | 10.2% |
-| ARM64 with SHA instructions disabled | 128 MiB random file | 0.7817 s | 0.6158 s | 21.2% |
-| ARM64 with SHA instructions disabled | 1,000 × 4 KiB files | 0.1665 s | 0.1520 s | 8.7% |
+| Native Apple ARM64 (SHA instructions) | 128 MiB random file | 0.3243 s | 0.2764 s | 14.8% |
+| Native Apple ARM64 (SHA instructions) | 1,000 × 4 KiB files | 0.1533 s | 0.1373 s | 10.4% |
+| ARM64 with SHA instructions disabled | 128 MiB random file | 0.7935 s | 0.6170 s | 22.3% |
+| ARM64 with SHA instructions disabled | 1,000 × 4 KiB files | 0.1684 s | 0.1522 s | 9.6% |
 
-The final measurements show about 15–21% lower large-file time and 9–10%
+The final measurements show about 15–22% lower large-file time and 10%
 lower small-file time against the original baseline.
 These are loopback measurements with warm filesystem caches, including planning,
 handshake, encryption, file sync and delivery acknowledgement. Independent
@@ -61,13 +62,17 @@ Raw results include executable hashes, platform and all trials:
 
 The software-SHA build uses `-Dtarget=aarch64-macos -Dcpu=generic-sha2` on the
 same physical Mac to exercise the standard library's portable SHA-256 path.
-It is not a Linux or Raspberry Pi measurement. No new Rust comparison or physical
-LAN benchmark was run; these numbers cannot be substituted for the older LAN
-results. Browser selection still requires a local staging copy before transfer.
+It is a portable-hashing experiment on macOS. The
+[Rust-versus-Zig LAN comparison](README.md) remains historical: the new
+Pi-to-Mac run failed to establish a usable session, and tiny-file probes
+failed for both Rust and Zig. Both existing Mac interfaces were checked.
+[Attempt metadata](lan-attempt-2026-10-05.json) records the limitation. No
+network settings were changed. Browser selection still requires a local
+staging copy before transfer.
 
-## Second-pass comparison
+## Earlier second-pass comparison
 
-[second-pass.json](second-pass.json) compares the prior pipeline with the final
+[second-pass.json](second-pass.json) records the earlier comparison of the pipeline with the
 in-place crypto/parent-handle changes on the native Mac. The 1,000-file median
 fell from 0.1628 s to 0.1441 s (11.5% less time); the large-file median was
 0.2736 s versus 0.2764 s, a 1.1% difference that does not establish a meaningful
@@ -98,5 +103,8 @@ Mac. Added integration fixtures cover 64 KiB and 1 MiB boundaries, multiple
 bulk buffers and partial final blocks. A same-size modification in a large
 source file after approval planning is rejected without publishing it.
 Both old-to-new and new-to-old Zig transfers pass independent hash checks.
-Native Linux/Windows behavior and real Wi-Fi performance require their own
-runs; cross-compilation does not replace those checks.
+The same real transfer and browser API checks also pass natively on the
+Raspberry Pi (Linux ARM64), including broadcast discovery when the receiver
+uses a specific IPv4 bind address. Six release targets cross-compile. Native Windows
+validation runs in CI; cross-compilation does not replace it. The LAN harness
+does not establish whether the route uses Wi-Fi or Ethernet.
