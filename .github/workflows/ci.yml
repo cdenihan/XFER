@@ -26,6 +26,9 @@ jobs:
         with:
           python-version: '3.x'
       - run: node tests/ui.js
+      - name: LAN benchmark harness regressions
+        if: runner.os != 'Windows'
+        run: python tests/benchmark.py
       - run: zig fmt --check build.zig src
       - run: zig build test
       - run: zig build -Doptimize=ReleaseSafe

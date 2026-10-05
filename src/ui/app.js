@@ -248,6 +248,9 @@ async function decide(approve) {
     await api('decision', { id: pending.id, approve, code: pending.code });
     element('approval').close();
   } catch (error) {
+    if (current?.pending?.id === pending.id && current.pending.code === pending.code) {
+      element('accept').disabled = !element('match').checked;
+    }
     notice(error.message);
   } finally {
     element('decline').disabled = false;

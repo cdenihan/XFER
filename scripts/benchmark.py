@@ -49,8 +49,21 @@ def receiver(binary, implementation, output, token, config, port):
         ready.put(False)
     reader = threading.Thread(target=consume, daemon=True)
     reader.start()
-    if not ready.get(timeout=20):
-        raise RuntimeError('Receiver not ready: ' + ''.join(lines) + process.stderr.read())
+    try:
+        try:
+            listening = ready.get(timeout=20)
+        except queue.Empty as error:
+            raise RuntimeError('Receiver did not become ready within 20 seconds') from error
+        if not listening:
+            raise RuntimeError('Receiver exited before becoming ready: ' + ''.join(lines))
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        reader.join(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+        raise
     return process, reader, lines
 
 
@@ -197,4 +210,6 @@ if __name__ == '__main__':
     parser.add_argument('--files', type=int, default=1000)
     parser.add_argument('--trials', type=int, default=3)
     args = parser.parse_args()
+    if args.trials < 1:
+        parser.error('--trials must be positive')
     worker(args) if args.worker else run(args)
