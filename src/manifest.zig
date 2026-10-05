@@ -78,9 +78,13 @@ fn scan(a: std.mem.Allocator, io: Io, dir: Io.Dir, path: []const u8, entries: *s
     if (path_bytes.* > max_encoded / 2) return error.ManifestTooLarge;
     var entry: Entry = .{ .path = try a.dupe(u8, path), .kind = if (stat.kind == .file) .file else .directory };
     if (stat.kind == .file) {
-        const file = try paths.openFile(dir, io, path);
+        // The parent is already open with no-follow traversal. Reuse it rather
+        // than reopening every ancestor, and check the opened handle's kind.
+        const file = try p.dir.openFile(io, p.name, .{ .follow_symlinks = false, .allow_directory = false });
         defer file.close(io);
-        entry.size = (try file.stat(io)).size;
+        const opened = try file.stat(io);
+        if (opened.kind != .file) return error.UnsupportedFile;
+        entry.size = opened.size;
         entry.hash = try hashFile(file, io, entry.size);
         try entries.append(a, entry);
     } else {

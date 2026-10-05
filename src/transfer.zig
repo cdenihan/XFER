@@ -4,6 +4,10 @@ const paths = @import("paths.zig");
 const manifest = @import("manifest.zig");
 const wire = @import("wire.zig");
 const Reporter = @import("reporter.zig").Reporter;
+// Keep the 64 KiB wire format, but amortize disk operations for bulk files.
+// Small files use the existing buffer and need no additional allocation.
+const bulk_threshold = 1024 * 1024;
+const bulk_buffer_size = 1024 * 1024;
 const confirm = @import("reporter.zig").confirm;
 
 pub const Options = struct {
@@ -87,18 +91,44 @@ pub fn send(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, plan: manifest.
         const file = try paths.openFile(plan.source, io, entry.path);
         defer file.close(io);
         if ((try file.stat(io)).size != entry.size) return error.SourceChanged;
+        const bulk = if (entry.size >= bulk_threshold) try a.alloc(u8, 2 * bulk_buffer_size) else null;
+        defer if (bulk) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            a.free(bytes);
+        };
+        var current: []u8 = if (bulk) |bytes| bytes[0..bulk_buffer_size] else &buffer;
+        var spare: []u8 = if (bulk) |bytes| bytes[bulk_buffer_size..] else &buffer;
         var hash = manifest.Sha256.init(.{});
         var position: u64 = 0;
+        if (entry.size != 0) try readAndHash(file, io, current[0..@min(current.len, entry.size)], 0, &hash);
         while (position < entry.size) {
-            const chunk = buffer[0..@min(buffer.len, entry.size - position)];
-            if (try file.readPositionalAll(io, chunk, position) != chunk.len) return error.SourceChanged;
-            hash.update(chunk);
-            try channel.send(.data, chunk);
-            position += chunk.len;
+            const chunk = current[0..@min(current.len, entry.size - position)];
+            const next_position = position + chunk.len;
+            // Only the worker touches the hash while sending the previous block.
+            // async falls back to synchronous execution if concurrency is unavailable.
+            var next: ?Io.Future(anyerror!void) = if (bulk != null and next_position < entry.size)
+                io.async(readAndHash, .{ file, io, spare[0..@min(spare.len, entry.size - next_position)], next_position, &hash })
+            else
+                null;
+            // Cancel and join before the file, hash or buffers leave scope.
+            defer if (next) |*task| task.cancel(io) catch {};
+            var record_offset: usize = 0;
+            while (record_offset < chunk.len) {
+                const n = @min(wire.max_payload, chunk.len - record_offset);
+                try channel.send(.data, chunk[record_offset..][0..n]);
+                record_offset += n;
+            }
+            position = next_position;
             sent += chunk.len;
             if (sent - reported >= 4 * 1024 * 1024) {
                 try options.reporter.event("progress", entry.path, sent, plan.offer.total);
                 reported = sent;
+            }
+            if (next) |*task| {
+                try task.await(io);
+                std.mem.swap([]u8, &current, &spare);
+            } else if (position < entry.size) {
+                try readAndHash(file, io, current[0..@min(current.len, entry.size - position)], position, &hash);
             }
         }
         if (!std.mem.eql(u8, &hash.finalResult(), &entry.hash) or (try file.stat(io)).size != entry.size) return error.SourceChanged;
@@ -108,6 +138,11 @@ pub fn send(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, plan: manifest.
     if (delivered.len == 0 or delivered.len > 255) return error.InvalidRecord;
     try paths.validateName(delivered);
     try options.reporter.event("sent", delivered, sent, plan.offer.total);
+}
+
+fn readAndHash(file: Io.File, io: Io, chunk: []u8, position: u64, hash: *manifest.Sha256) anyerror!void {
+    if (try file.readPositionalAll(io, chunk, position) != chunk.len) return error.SourceChanged;
+    hash.update(chunk);
 }
 
 pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.Dir, options: Options) !void {
@@ -154,13 +189,43 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
         }
         const file = try p.dir.createFile(io, p.name, .{ .exclusive = true, .permissions = privateFilePermissions() });
         defer file.close(io);
+        const bulk = if (entry.size >= bulk_threshold) try a.alloc(u8, 2 * bulk_buffer_size) else null;
+        defer if (bulk) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            a.free(bytes);
+        };
+        var current: []u8 = if (bulk) |bytes| bytes[0..bulk_buffer_size] else &.{};
+        var spare: []u8 = if (bulk) |bytes| bytes[bulk_buffer_size..] else &.{};
+        var buffered: usize = 0;
+        var written: u64 = 0;
         var hash = manifest.Sha256.init(.{});
+        var pending: ?Io.Future(anyerror!void) = null;
+        defer if (pending) |*task| task.cancel(io) catch {};
         var position: u64 = 0;
         while (position < entry.size) {
             const chunk = try channel.expect(.data);
             if (chunk.len == 0 or chunk.len > entry.size - position) return error.InvalidRecord;
-            hash.update(chunk);
-            try file.writePositionalAll(io, chunk, position);
+            if (bulk != null) {
+                // Peers may send arbitrary short records; do not assume alignment.
+                if (chunk.len > current.len - buffered) {
+                    if (pending) |*task| try task.await(io);
+                    pending = io.async(writeAndHash, .{ file, io, current[0..buffered], written, &hash });
+                    written += buffered;
+                    buffered = 0;
+                    std.mem.swap([]u8, &current, &spare);
+                }
+                @memcpy(current[buffered..][0..chunk.len], chunk);
+                buffered += chunk.len;
+                if (buffered == current.len) {
+                    if (pending) |*task| try task.await(io);
+                    pending = io.async(writeAndHash, .{ file, io, current, written, &hash });
+                    written += buffered;
+                    buffered = 0;
+                    std.mem.swap([]u8, &current, &spare);
+                }
+            } else {
+                try writeAndHash(file, io, chunk, position, &hash);
+            }
             position += chunk.len;
             received += chunk.len;
             if (received - reported >= 4 * 1024 * 1024) {
@@ -168,6 +233,8 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
                 reported = received;
             }
         }
+        if (pending) |*task| try task.await(io);
+        if (buffered != 0) try writeAndHash(file, io, current[0..buffered], written, &hash);
         if (!std.mem.eql(u8, &hash.finalResult(), &entry.hash)) return error.IntegrityMismatch;
         try file.sync(io);
     }
@@ -178,6 +245,11 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
     // Once published, delivery is committed even if the acknowledgement is lost.
     try options.reporter.event("received", final_name, received, offer.total);
     try channel.send(.delivered, final_name);
+}
+
+fn writeAndHash(file: Io.File, io: Io, chunk: []const u8, position: u64, hash: *manifest.Sha256) anyerror!void {
+    hash.update(chunk);
+    try file.writePositionalAll(io, chunk, position);
 }
 
 fn consent(channel: *wire.Channel, options: Options, offer: manifest.Offer, receiving: bool) !void {

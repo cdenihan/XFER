@@ -1,0 +1,165 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "machine": "arm64",
+  "binary_sha256": {
+    "before": "f85ef1dd0f55019493acccdc984abff5c442d9a5a6c73dd86c60ed9e3be8513c",
+    "after": "166e7ea8270e6ffddc57e2d4111743c1f955ac4193c7ed6f864d3a8904ab73c9"
+  },
+  "scope": "loopback, warm filesystem cache; includes planning, encryption, sync and acknowledgement",
+  "trials": [
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": true,
+      "wall_s": 0.335660167
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": true,
+      "wall_s": 0.276035417
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.27297516599999994
+    },
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.3339296660000002
+    },
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.33008162500000005
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.27941174999999996
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.27602199999999977
+    },
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.3296878750000003
+    },
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.3269623749999999
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.28016799999999975
+    },
+    {
+      "dataset": "large",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.27900770900000005
+    },
+    {
+      "dataset": "large",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.33060033400000055
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": true,
+      "wall_s": 0.16852041699999987
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": true,
+      "wall_s": 0.13627445799999993
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.13640537499999983
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.16407600000000055
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.15652033400000054
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.14044566699999983
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.13992862500000047
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.1506546249999996
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.15169808300000032
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.13717012499999992
+    },
+    {
+      "dataset": "small",
+      "binary": "after",
+      "warmup": false,
+      "wall_s": 0.13682429200000001
+    },
+    {
+      "dataset": "small",
+      "binary": "before",
+      "warmup": false,
+      "wall_s": 0.15281495799999956
+    }
+  ],
+  "medians_s": {
+    "large": {
+      "before": 0.33008162500000005,
+      "after": 0.27900770900000005
+    },
+    "small": {
+      "before": 0.15281495799999956,
+      "after": 0.13717012499999992
+    }
+  }
+}

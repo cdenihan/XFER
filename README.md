@@ -159,6 +159,9 @@ packaging. CI runs the suite natively on Windows, macOS, and Linux, and builds
 x86-64 and ARM64 for each platform. See [development](docs/DEVELOPMENT.md),
 [installation](docs/INSTALLATION.md), and the [wire protocol](docs/PROTOCOL.md).
 
+For the large-file pipeline and measured results, see
+[performance](benchmarks/PERFORMANCE.md).
+
 ## Boundaries
 
 This is a deliberate breaking redesign around nearby sharing. The old Rust

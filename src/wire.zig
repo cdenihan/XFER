@@ -51,7 +51,6 @@ pub const Channel = struct {
     phase_deadline: Io.Clock.Timestamp,
     tx_buffer: [4 + max_payload + 1 + 16]u8 = undefined,
     rx_buffer: [max_payload + 1 + 16]u8 = undefined,
-    plain: [max_payload + 1]u8 = undefined,
 
     pub fn init(stream: Io.net.Stream, io: Io, role: Role, token: []const u8) !Channel {
         var seed: [32]u8 = undefined;
@@ -115,7 +114,6 @@ pub const Channel = struct {
     pub fn deinit(self: *Channel) void {
         std.crypto.secureZero(u8, &self.tx_key);
         std.crypto.secureZero(u8, &self.rx_key);
-        std.crypto.secureZero(u8, &self.plain);
         std.crypto.secureZero(u8, &self.tx_buffer);
         std.crypto.secureZero(u8, &self.rx_buffer);
     }
@@ -128,10 +126,12 @@ pub const Channel = struct {
     pub fn send(self: *Channel, kind: Kind, payload: []const u8) !void {
         try self.checkDeadline();
         if (payload.len > max_payload or self.tx_seq == std.math.maxInt(u64)) return error.RecordLimit;
-        var plaintext: [max_payload + 1]u8 = undefined;
-        defer std.crypto.secureZero(u8, &plaintext);
-        plaintext[0] = @backingInt(kind);
-        @memcpy(plaintext[1..][0..payload.len], payload);
+        // Exact overlap is supported by Zig's ChaCha implementation. Encrypt
+        // directly in the frame buffer, avoiding a copy and full-buffer wipe
+        // for every record (including empty control records and tiny files).
+        const ciphertext = self.tx_buffer[4..][0 .. payload.len + 1];
+        ciphertext[0] = @backingInt(kind);
+        @memcpy(ciphertext[1..], payload);
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(payload.len + 1 + 16), .little);
         var aad: [12]u8 = undefined;
@@ -139,8 +139,7 @@ pub const Channel = struct {
         std.mem.writeInt(u64, aad[4..12], self.tx_seq, .little);
         const nonce = recordNonce(self.tx_seq);
         var tag: [16]u8 = undefined;
-        const ciphertext = self.tx_buffer[4..][0 .. payload.len + 1];
-        Aead.encrypt(ciphertext, &tag, plaintext[0 .. payload.len + 1], &aad, nonce, self.tx_key);
+        Aead.encrypt(ciphertext, &tag, ciphertext, &aad, nonce, self.tx_key);
         @memcpy(self.tx_buffer[0..4], &header);
         @memcpy(self.tx_buffer[4 + ciphertext.len ..][0..16], &tag);
         try writeAll(self.stream, self.io, self.tx_buffer[0 .. 4 + ciphertext.len + 16], self.phase_deadline);
@@ -160,10 +159,11 @@ pub const Channel = struct {
         @memcpy(aad[0..4], &header);
         std.mem.writeInt(u64, aad[4..12], self.rx_seq, .little);
         const plain_len = len - 16;
-        try Aead.decrypt(self.plain[0..plain_len], self.rx_buffer[0..plain_len], self.rx_buffer[plain_len..][0..16].*, &aad, recordNonce(self.rx_seq), self.rx_key);
+        const plaintext = self.rx_buffer[0..plain_len];
+        try Aead.decrypt(plaintext, plaintext, self.rx_buffer[plain_len..][0..16].*, &aad, recordNonce(self.rx_seq), self.rx_key);
         self.rx_seq += 1;
-        const kind = std.enums.fromInt(Kind, self.plain[0]) orelse return error.InvalidRecord;
-        return .{ .kind = kind, .data = self.plain[1..plain_len] };
+        const kind = std.enums.fromInt(Kind, plaintext[0]) orelse return error.InvalidRecord;
+        return .{ .kind = kind, .data = plaintext[1..] };
     }
     pub fn expect(self: *Channel, kind: Kind) ![]const u8 {
         const record = try self.receive();
@@ -190,4 +190,24 @@ test "authenticated records bind length, direction and sequence" {
     try std.testing.expectError(error.AuthenticationFailed, Aead.decrypt(&plain, &ciphertext, tag, aad, recordNonce(1), key));
     ciphertext[0] ^= 1;
     try std.testing.expectError(error.AuthenticationFailed, Aead.decrypt(&plain, &ciphertext, tag, aad, recordNonce(0), key));
+}
+
+test "in-place record crypto matches disjoint buffers at block boundaries" {
+    const key: [32]u8 = @splat(7);
+    const aad = "record";
+    var original: [max_payload + 1]u8 = undefined;
+    for (&original, 0..) |*byte, i| byte.* = @truncate(i);
+    var inplace: [max_payload + 1]u8 = undefined;
+    var separate: [max_payload + 1]u8 = undefined;
+    for ([_]usize{ 1, 15, 16, 17, 63, 64, 65, 255, 256, 257, max_payload + 1 }) |len| {
+        @memcpy(inplace[0..len], original[0..len]);
+        var tag: [16]u8 = undefined;
+        var reference_tag: [16]u8 = undefined;
+        Aead.encrypt(separate[0..len], &reference_tag, original[0..len], aad, recordNonce(9), key);
+        Aead.encrypt(inplace[0..len], &tag, inplace[0..len], aad, recordNonce(9), key);
+        try std.testing.expectEqualSlices(u8, separate[0..len], inplace[0..len]);
+        try std.testing.expectEqualSlices(u8, &reference_tag, &tag);
+        try Aead.decrypt(inplace[0..len], inplace[0..len], tag, aad, recordNonce(9), key);
+        try std.testing.expectEqualSlices(u8, original[0..len], inplace[0..len]);
+    }
 }

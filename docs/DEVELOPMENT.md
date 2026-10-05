@@ -51,6 +51,20 @@ already declared directory parent. File access opens each path component
 separately without following links. A source that changes while streaming
 cannot match the preapproved digest and is never published.
 
+Files smaller than 1 MiB retain synchronous streaming with a 64 KiB buffer.
+Larger files use two 1 MiB buffers per endpoint: the sender overlaps the next
+read/hash with encryption/transmission, and the receiver overlaps the previous
+hash/write with reception/decryption. Only one task touches a file hash at a
+time. Futures are canceled and joined before their borrowed buffers, hash state
+or file handles expire; `Io.async` can execute synchronously when concurrency
+is unavailable. All hashes, consent checks, syncs and publication rules remain.
+The 64 KiB wire limit is unchanged, so previous Zig peers still interoperate.
+Record encryption and decryption use exact-overlap channel buffers. The
+standard-library crypto aliasing behavior is covered by boundary tests and the
+buffers are wiped on channel teardown. Planning reuses its already validated
+parent directory handle while retaining no-follow and opened-file kind checks.
+See [performance measurements](../benchmarks/PERFORMANCE.md).
+
 The connection API in Zig 0.17's `Io.Threaded` backend panics when
 `ConnectOptions.timeout` is set. `transfer.connect` instead races a normal
 cancellable connection against a 10-second `Io.Select` timer. It cancels the

@@ -180,12 +180,12 @@ def interactive_test(root, payload):
                 self.thread.join(timeout=3)
                 os.close(self.master)
 
-    for case in ('accept', 'decline', 'change'):
+    for case in ('accept', 'decline', 'change', 'change-bulk'):
         approved = case != 'decline'
         item = payload
-        if case == 'change':
+        if case in ('change', 'change-bulk'):
             item = root / 'changing.txt'
-            item.write_text('before')
+            item.write_bytes(b'b' * (3 * 1024 * 1024 + 13) if case == 'change-bulk' else b'before')
         output = root / ('interactive-' + case)
         port = free_port()
         receiving = Terminal(['receive', '--once', '--no-discovery', '--bind', '127.0.0.1', '--port', str(port), '--output', str(output)])
@@ -197,6 +197,11 @@ def interactive_test(root, payload):
         assert re.search(code_pattern, receiver_text)[1] == re.search(code_pattern, sender_text)[1]
         if case == 'change':
             item.write_text('after!')
+        elif case == 'change-bulk':
+            # Same size, changed contents: the streaming hash must still reject.
+            with item.open('r+b') as stream:
+                stream.seek(2 * 1024 * 1024)
+                stream.write(b'changed')
         receiving.approve('yes' if approved else 'no')
         # The sender's affirmative answer cannot override a receiver rejection.
         sending.approve('yes')
@@ -219,6 +224,9 @@ def main():
         (payload / 'zero').touch()
         needle = b'PRIVATE-FILE-CONTENT-MUST-BE-ENCRYPTED-51c486'
         (payload / 'large.bin').write_bytes(needle * 1000 + os.urandom(5 * 1024 * 1024))
+        # Disk buffering threshold, wire boundary and partial final bulk blocks.
+        for size in (65535, 65536, 65537, 1048575, 1048576, 1048577, 2097165):
+            (payload / f'boundary-{size}.bin').write_bytes(os.urandom(size))
         # Symlinks are never copied or followed; skip only if the host forbids creation.
         try:
             (payload / 'outside-link').symlink_to(root / 'outside.txt')
