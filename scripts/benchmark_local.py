@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Alternating loopback benchmarks; stdlib only, independent SHA-256 checks."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -67,7 +68,7 @@ def main():
     args = parser.parse_args()
     if args.trials < 1:
         parser.error('--trials must be positive')
-    results = {'platform': platform.platform(), 'machine': platform.machine(), 'binary_sha256': {label: hashlib.sha256(getattr(args, label).read_bytes()).hexdigest() for label in ('before', 'after')}, 'scope': 'loopback, warm filesystem cache; includes planning, encryption, sync and acknowledgement', 'trials': []}
+    results = {'measured_at': datetime.now(timezone.utc).isoformat(), 'platform': platform.platform(), 'machine': platform.machine(), 'binary_sha256': {label: hashlib.sha256(getattr(args, label).read_bytes()).hexdigest() for label in ('before', 'after')}, 'scope': 'loopback, warm filesystem cache; includes planning, encryption, sync and acknowledgement', 'trials': []}
     with tempfile.TemporaryDirectory(prefix='xfer-local-benchmark-') as tmp:
         root = Path(tmp)
         large = root / 'large.bin'

@@ -18,6 +18,7 @@ const Upload = struct {
     name: []const u8,
     total: u64 = 0,
     count: usize = 0,
+    directories: std.StringHashMapUnmanaged(void) = .empty,
     in_use: bool = false,
     abort: ?*Io.Event = null,
     canceled: bool = false,
@@ -66,7 +67,9 @@ const State = struct {
     fn finish(self: *State, result: anyerror!void) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (result) |_| {} else |err| self.setMessage("failed", @errorName(err));
+        if (result) |_| {} else |err| {
+            if (!std.mem.eql(u8, self.phase, "received")) self.setMessage("failed", @errorName(err));
+        }
         self.busy = false;
         self.active = null;
         self.pending = null;
@@ -77,7 +80,7 @@ fn onEvent(context: *anyopaque, event: []const u8, message: []const u8, bytes: u
     const s: *State = @ptrCast(@alignCast(context));
     try s.mutex.lock(s.io);
     defer s.mutex.unlock(s.io);
-    if (s.canceled) return error.Canceled;
+    if (s.canceled and !std.mem.eql(u8, event, "received")) return error.Canceled;
     // Retain only known static event names; borrowed network text is copied.
     const phases = [_][]const u8{ "planning", "planned", "connecting", "offer", "accepted", "progress", "sent", "received", "failed" };
     for (phases) |phase| if (std.mem.eql(u8, phase, event)) {
@@ -149,12 +152,17 @@ pub fn run(init: std.process.Init, settings: Settings) !void {
     try state.workers.concurrent(io, lanLoop, .{ &state, &lan });
     try state.workers.concurrent(io, httpLoop, .{ &state, &local });
     try state.workers.concurrent(io, refreshPeers, .{&state});
-    if (lan_address == .ip4) {
-        udp = try discovery.bind(io, lan_address);
-        try state.workers.concurrent(io, discovery.serve, .{ io, udp.?, settings.port, settings.name, instance });
-    }
     const reporter: Reporter = .{ .io = io, .json = settings.json };
+    var discovery_error: ?anyerror = null;
+    if (lan_address == .ip4) {
+        udp = discovery.bind(io, lan_address) catch |err| blk: {
+            discovery_error = err;
+            break :blk null;
+        };
+        if (udp) |socket| try state.workers.concurrent(io, discovery.serve, .{ io, socket, lan_address, settings.port, settings.name, instance });
+    }
     try reporter.event("desktop", url, 0, 0);
+    if (discovery_error) |err| try reporter.event("warning", @errorName(err), 0, 0);
     if (settings.open_browser) {
         openBrowser(io, a, url) catch |err| try reporter.event("warning", @errorName(err), 0, 0);
     }
@@ -216,10 +224,16 @@ fn refreshPeers(s: *State) void {
             const address = std.fmt.allocPrint(arena.allocator(), "{f}", .{peer.address}) catch continue;
             peers.append(arena.allocator(), .{ .name = peer.name, .address = address }) catch continue;
         }
+        // Complete all allocations before transferring arena ownership.
+        const owned = peers.toOwnedSlice(arena.allocator()) catch {
+            arena.deinit();
+            s.io.sleep(.fromSeconds(2), .awake) catch return;
+            continue;
+        };
         s.mutex.lockUncancelable(s.io);
         s.peer_arena.deinit();
         s.peer_arena = arena;
-        s.peers = peers.toOwnedSlice(arena.allocator()) catch &.{};
+        s.peers = owned;
         s.mutex.unlock(s.io);
         s.io.sleep(.fromSeconds(2), .awake) catch return;
     }
@@ -286,18 +300,46 @@ fn httpLoop(s: *State, server: *Io.net.Server) void {
         };
     }
 }
+const HttpControl = struct {
+    abort: Io.Event = .unset,
+    mutex: Io.Mutex = .init,
+    idle_deadline: Io.Clock.Timestamp,
+
+    fn touch(self: *HttpControl, io: Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.idle_deadline = wire.timeout(300).toTimestamp(io).?;
+    }
+    fn wait(self: *HttpControl, io: Io) !void {
+        while (true) {
+            self.mutex.lockUncancelable(io);
+            const deadline: Io.Timeout = .{ .deadline = self.idle_deadline };
+            self.mutex.unlock(io);
+            self.abort.waitTimeout(io, deadline) catch |err| {
+                if (err != error.Timeout) return err;
+                // Progress can extend the deadline while this wait is asleep.
+                self.mutex.lockUncancelable(io);
+                const expired = self.idle_deadline.durationFromNow(io).raw.nanoseconds <= 0;
+                self.mutex.unlock(io);
+                if (expired) return error.Timeout;
+                continue;
+            };
+            return;
+        }
+    }
+};
 fn httpConnection(s: *State, stream: Io.net.Stream) void {
     defer {
         stream.close(s.io);
         _ = s.connections.fetchSub(1, .acq_rel);
     }
     const Result = union(enum) { done: anyerror!void, timeout: anyerror!void };
-    var abort: Io.Event = .unset;
+    var control: HttpControl = .{ .idle_deadline = wire.timeout(300).toTimestamp(s.io).? };
     var results: [2]Result = undefined;
     var select = Io.Select(Result).init(s.io, &results);
     defer select.cancelDiscard();
-    select.concurrent(.done, httpInner, .{ s, stream, &abort }) catch return;
-    select.concurrent(.timeout, Io.Event.waitTimeout, .{ &abort, s.io, wire.timeout(300) }) catch return;
+    select.concurrent(.done, httpInner, .{ s, stream, &control }) catch return;
+    select.concurrent(.timeout, HttpControl.wait, .{ &control, s.io }) catch return;
     _ = select.await() catch return;
 }
 const response_headers = [_]std.http.Header{
@@ -308,7 +350,7 @@ const response_headers = [_]std.http.Header{
 fn reply(request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
     try request.respond(body, .{ .status = status, .keep_alive = false, .extra_headers = &response_headers });
 }
-fn httpInner(s: *State, stream: Io.net.Stream, abort: *Io.Event) !void {
+fn httpInner(s: *State, stream: Io.net.Stream, control: *HttpControl) !void {
     var arena: std.heap.ArenaAllocator = .init(s.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -318,6 +360,7 @@ fn httpInner(s: *State, stream: Io.net.Stream, abort: *Io.Event) !void {
     var writer = stream.writer(s.io, &output_buffer);
     var server = std.http.Server.init(&reader.interface, &writer.interface);
     var request = try server.receiveHead();
+    control.touch(s.io);
     var authorization: ?[]const u8 = null;
     var host: ?[]const u8 = null;
     var origin: ?[]const u8 = null;
@@ -353,7 +396,7 @@ fn httpInner(s: *State, stream: Io.net.Stream, abort: *Io.Event) !void {
     }
     const expected = try std.fmt.allocPrint(a, "Bearer {s}", .{s.token});
     if (authorization == null or !std.mem.eql(u8, authorization.?, expected)) return reply(&request, .unauthorized, "{\"error\":\"Launch XFER to open this window\"}");
-    route(s, a, &request, upload_path, abort) catch |err| {
+    route(s, a, &request, upload_path, control) catch |err| {
         // Cancellation is terminal; responding could retry a stalled body read.
         if (err == error.Canceled) return err;
         const body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = @errorName(err) }, .{});
@@ -367,7 +410,7 @@ fn jsonBody(comptime T: type, a: std.mem.Allocator, request: *std.http.Server.Re
     const body = try reader.allocRemaining(a, .limited(8192));
     return std.json.parseFromSlice(T, a, body, .{ .allocate = .alloc_always });
 }
-fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, path_header: ?[]const u8, abort: *Io.Event) !void {
+fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, path_header: ?[]const u8, control: *HttpControl) !void {
     const target = try a.dupe(u8, request.head.target);
     if (request.head.method == .GET and std.mem.eql(u8, target, "/api/state")) {
         const body = blk: {
@@ -444,7 +487,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
             upload.root = try Io.Dir.cwd().openDir(s.io, upload.path, .{ .follow_symlinks = false });
             errdefer upload.root.close(s.io);
             upload.name = try upload.arena.allocator().dupe(u8, body.value.name);
-            if (body.value.folder) try upload.root.createDir(s.io, upload.name, privateDirPermissions());
+            if (body.value.folder) try ensureUploadDirectories(upload, s.io, upload.name);
             s.upload = upload;
             s.busy = true;
             s.canceled = false;
@@ -466,12 +509,11 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
             if (upload.in_use or upload.canceled or upload.count >= manifest.max_entries) return error.InvalidUpload;
             const path = body.value.path;
             if (!(std.mem.eql(u8, path, upload.name) or (path.len > upload.name.len and std.mem.startsWith(u8, path, upload.name) and path[upload.name.len] == '/'))) return error.InvalidUpload;
-            try upload.root.createDirPath(s.io, path);
-            upload.count += 1;
+            try ensureUploadDirectories(upload, s.io, path);
         }
         return reply(request, .ok, "{}");
     }
-    if (std.mem.eql(u8, target, "/api/upload")) return uploadFile(s, a, request, path_header orelse return error.PathRequired, abort);
+    if (std.mem.eql(u8, target, "/api/upload")) return uploadFile(s, a, request, path_header orelse return error.PathRequired, control);
     if (std.mem.eql(u8, target, "/api/send")) {
         const body = try jsonBody(struct { to: []const u8 }, a, request);
         defer body.deinit();
@@ -489,7 +531,7 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
     }
     return reply(request, .not_found, "{}");
 }
-fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, abort: *Io.Event) !void {
+fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, control: *HttpControl) !void {
     const path = try decodePath(a, encoded);
     try paths.validate(path);
     const size = request.head.content_length orelse return error.LengthRequired;
@@ -505,7 +547,7 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
         return error.InvalidUpload;
     }
     upload.in_use = true;
-    upload.abort = abort;
+    upload.abort = &control.abort;
     s.mutex.unlock(s.io);
     var succeeded = false;
     defer {
@@ -520,7 +562,8 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
         }
         s.mutex.unlock(s.io);
     }
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| try upload.root.createDirPath(s.io, path[0..slash]);
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| try ensureUploadDirectories(upload, s.io, path[0..slash]);
+    if (upload.count >= manifest.max_entries) return error.InvalidUpload;
     const parent = try paths.parent(upload.root, s.io, path);
     defer parent.close(s.io);
     const file = try parent.dir.createFile(s.io, parent.name, .{ .exclusive = true, .permissions = privateFilePermissions() });
@@ -531,9 +574,17 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
     var offset: u64 = 0;
     while (offset < size) {
         const chunk = bytes[0..@min(bytes.len, size - offset)];
-        try reader.readSliceAll(chunk);
-        try file.writePositionalAll(s.io, chunk, offset);
-        offset += chunk.len;
+        var vectors = [_][]u8{chunk};
+        const n = try reader.readVec(&vectors);
+        // Some Reader adapters fill their internal buffer and return zero;
+        // EndOfStream is an error, not a zero-byte read from this interface.
+        if (n == 0) {
+            try s.io.checkCancel();
+            continue;
+        }
+        control.touch(s.io);
+        try file.writePositionalAll(s.io, chunk[0..n], offset);
+        offset += n;
         try s.mutex.lock(s.io);
         const canceled = upload.canceled;
         s.bytes = upload.total + offset;
@@ -547,6 +598,25 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
     succeeded = true;
     try reply(request, .ok, "{}");
 }
+// The private selection has no symlinks. Count each distinct directory once,
+// including ancestors implied by file-picker paths, before consuming a body.
+fn ensureUploadDirectories(upload: *Upload, io: Io, path: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    var end: usize = 0;
+    while (parts.next()) |part| {
+        end += part.len;
+        const prefix = path[0..end];
+        if (!upload.directories.contains(prefix)) {
+            if (upload.count >= manifest.max_entries) return error.InvalidUpload;
+            try upload.root.createDir(io, prefix, privateDirPermissions());
+            const owned = try upload.arena.allocator().dupe(u8, prefix);
+            try upload.directories.put(upload.arena.allocator(), owned, {});
+            upload.count += 1;
+        }
+        end += 1;
+    }
+}
+
 fn decodePath(a: std.mem.Allocator, encoded: []const u8) ![]u8 {
     if (encoded.len > paths.max_path * 3) return error.InvalidPath;
     var output: std.ArrayList(u8) = .empty;
@@ -574,4 +644,29 @@ test "browser paths decode strictly before portable validation" {
     try paths.validate(path);
     try std.testing.expectError(error.InvalidName, paths.validate(try decodePath(arena.allocator(), "photos/%2E%2E/escape")));
     try std.testing.expectError(error.InvalidPath, decodePath(arena.allocator(), "%2"));
+}
+
+test "implicit upload directories count once and respect entry cap" {
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var upload: Upload = .{ .arena = .init(std.testing.allocator), .path = "", .root = temporary.dir, .name = "photos" };
+    defer upload.arena.deinit();
+    try ensureUploadDirectories(&upload, io, "photos/a/b");
+    try std.testing.expectEqual(@as(usize, 3), upload.count);
+    try ensureUploadDirectories(&upload, io, "photos/a/b");
+    try std.testing.expectEqual(@as(usize, 3), upload.count);
+    upload.count = manifest.max_entries - 1;
+    try ensureUploadDirectories(&upload, io, "photos/c");
+    try std.testing.expectError(error.InvalidUpload, ensureUploadDirectories(&upload, io, "photos/d"));
+    try std.testing.expectEqual(@as(usize, manifest.max_entries), upload.count);
+}
+test "upload progress extends idle timeout and explicit abort still wakes it" {
+    const io = std.testing.io;
+    var control: HttpControl = .{ .idle_deadline = wire.timeout(-1).toTimestamp(io).? };
+    try std.testing.expectError(error.Timeout, control.wait(io));
+    control.touch(io);
+    try std.testing.expect(control.idle_deadline.durationFromNow(io).raw.nanoseconds > 0);
+    control.abort.set(io);
+    try control.wait(io);
 }

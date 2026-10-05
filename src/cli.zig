@@ -206,7 +206,7 @@ pub fn run(init: std.process.Init) !void {
                 discovery_socket = s;
                 var instance: [16]u8 = undefined;
                 try io.randomSecure(&instance);
-                try background.concurrent(io, discovery.serve, .{ io, s, config.port, name, instance });
+                try background.concurrent(io, discovery.serve, .{ io, s, address, config.port, name, instance });
             }
         }
         try reporter.event("listening", try std.fmt.allocPrint(a, "Listening on {f}. Saving to {s}. Press Ctrl+C to stop.", .{ server.socket.address, output_path }), 0, 0);

@@ -3,6 +3,7 @@
 Requires prebuilt binaries. Never installs software on the remote host.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -22,7 +23,15 @@ import time
 
 
 def inventory(root):
-    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file()}
+    result = {}
+    for path in sorted(root.rglob('*')):
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            result[path.relative_to(root).as_posix()] = digest.hexdigest()
+    return result
 
 
 def receiver(binary, implementation, output, token, config, port):
@@ -53,7 +62,7 @@ def worker(args):
     path = root / args.dataset
     print(json.dumps({'ready': True, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
         'binary_bytes': binary.stat().st_size, 'version': subprocess.check_output([str(binary), '--version'], text=True).strip(),
-        'platform': platform.platform(), 'cpu': next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('Model')), platform.machine())}), flush=True)
+        'platform': platform.platform(), 'machine': platform.machine(), 'cpu': next((line.split(':', 1)[1].strip() for line in (Path('/proc/cpuinfo').read_text().splitlines() if Path('/proc/cpuinfo').exists() else []) if line.startswith('Model')), platform.machine())}), flush=True)
     if input() != 'start':
         raise RuntimeError('Expected benchmark start signal')
     if args.implementation == 'rust':
@@ -68,7 +77,7 @@ def worker(args):
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    print(json.dumps({'wall_s': elapsed, 'sender_cpu_s': after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime, 'sender_peak_rss_kib': after.ru_maxrss}), flush=True)
+    print(json.dumps({'wall_s': elapsed, 'sender_cpu_s': after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime, 'sender_peak_rss_kib': after.ru_maxrss / 1024 if platform.system() == 'Darwin' else after.ru_maxrss}), flush=True)
 
 
 def run(args):
@@ -76,7 +85,10 @@ def run(args):
     remote_root = Path(root)
     if remote_root.parent != Path('/tmp') or not remote_root.name.startswith('xfer-benchmark-'):
         raise ValueError('Use an isolated /tmp/xfer-benchmark-* directory on the remote host')
-    metadata = {'receiver_platform': platform.platform(), 'binaries': {}}
+    metadata = {'measured_at': datetime.now(timezone.utc).isoformat(), 'receiver_platform': platform.platform(), 'receiver_machine': platform.machine(), 'binaries': {}, 'rust_commit': args.rust_commit, 'zig_commit': args.zig_commit, 'zig_build': args.zig_build}
+    receiver_binaries = {implementation: {'version': subprocess.check_output([binary, '--version'], text=True).strip(),
+        'binary_bytes': Path(binary).stat().st_size, 'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest()}
+        for implementation, binary in (('rust', args.rust), ('zig', args.zig))}
     source = Path(__file__).resolve().parent.parent
     digest = hashlib.sha256()
     for path in sorted([*source.joinpath('src').rglob('*'), source / 'build.zig', source / 'build.zig.zon', source / 'VERSION']):
@@ -132,8 +144,9 @@ def run(args):
                         assert ready['ready']
                         metadata['sender_platform'] = ready['platform']
                         metadata['sender_cpu'] = ready['cpu']
+                        metadata['sender_machine'] = ready['machine']
                         metadata['binaries'][implementation] = {'sender': {key: ready[key] for key in ('version', 'binary_bytes', 'binary_sha256')},
-                            'receiver': {'binary_bytes': Path(binary).stat().st_size, 'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest()}}
+                            'receiver': receiver_binaries[implementation]}
                         child.stdin.write('start\n')
                         child.stdin.flush()
                         line = child.stdout.readline()
@@ -152,7 +165,7 @@ def run(args):
                         row = {'dataset': dataset, 'implementation': implementation, 'trial': trial, 'warmup': trial == 0, 'bytes': payload, 'mib_s': payload / 1024**2 / elapsed, 'receiver_cpu_s': after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime, 'verified': True, **finished}
                         results.append(row)
                         print(json.dumps(row), flush=True)
-                        Path(args.output).write_text(json.dumps({'remote': remote, 'direction': 'Linux ARM64 sender to macOS ARM64 receiver over direct LAN TCP', 'local_address': destination, 'rust_release': 'v2026.09.06.1', 'rust_commit': '6214e213f392d6281455a3d3f24988012c6ee596', 'zig_build': 'ReleaseSafe', **metadata, 'results': results}, indent=2) + '\n')
+                        Path(args.output).write_text(json.dumps({'remote': remote, 'direction': f'{metadata["sender_platform"]} ({metadata["sender_machine"]}) sender to {metadata["receiver_platform"]} ({metadata["receiver_machine"]}) receiver over direct LAN TCP', 'local_address': destination, **metadata, 'results': results}, indent=2) + '\n')
                     finally:
                         for running in (process, child):
                             if running is not None and running.poll() is None:
@@ -177,6 +190,9 @@ if __name__ == '__main__':
     parser.add_argument('--rust')
     parser.add_argument('--zig')
     parser.add_argument('--output', default='benchmarks/results.json')
+    parser.add_argument('--rust-commit', default=None, help='Optional caller-supplied source revision; binaries are always hash-identified')
+    parser.add_argument('--zig-commit', default=None)
+    parser.add_argument('--zig-build', default='unspecified prebuilt binary')
     parser.add_argument('--large-mib', type=int, default=128)
     parser.add_argument('--files', type=int, default=1000)
     parser.add_argument('--trials', type=int, default=3)

@@ -24,11 +24,14 @@ def port():
 
 
 class Desktop:
-    def __init__(self, root, name, limit=16 * 1024**3):
+    def __init__(self, root, name, limit=16 * 1024**3, occupied_udp=False):
         self.root = root
         self.root.mkdir()
         self.port = port()
         self.output = root / 'received'
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if occupied_udp else None
+        if occupied:
+            occupied.bind(('127.0.0.1', self.port))
         env = {k: v for k, v in os.environ.items() if k != 'XFER_TOKEN'}
         env.update(TMPDIR=str(root), TEMP=str(root), TMP=str(root))
         self.process = subprocess.Popen([BINARY, '--no-open', '--json', '--bind', '127.0.0.1', '--port', str(self.port), '--name', name, '--output', str(self.output), '--max-bytes', str(limit)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -39,6 +42,8 @@ class Desktop:
         threading.Thread(target=consume, daemon=True).start()
         event = self.events.get(timeout=10)
         assert event['event'] == 'desktop', event
+        if occupied:
+            occupied.close()
         url = urlsplit(event['message'])
         self.host, self.http_port, self.token = url.hostname, url.port, url.fragment
 
@@ -91,7 +96,7 @@ class Desktop:
 def run():
     with tempfile.TemporaryDirectory(prefix='xfer-desktop-test-') as directory:
         root = Path(directory)
-        sender = Desktop(root / 'sender', 'Sender')
+        sender = Desktop(root / 'sender', 'Sender', occupied_udp=True)
         receiver = Desktop(root / 'receiver', 'Receiver')
         try:
             page, headers = sender.request('/', method='GET')
@@ -132,7 +137,7 @@ def run():
 
             content = os.urandom(2 * 1024 * 1024 + 97)
             sender.prepare('été', [('été/nested/photo.bin', content), ('été/empty.txt', b'')], ['été', 'été/empty-directory'])
-            sender.request('/api/send', {'to': '127.0.0.1:' + str(receiver.port)})
+            sender.request('/api/send', {'to': 'localhost:' + str(receiver.port)})
             left = sender.wait(lambda s: s['pending'] is not None)['pending']
             right = receiver.wait(lambda s: s['pending'] is not None)['pending']
             assert left['code'] == right['code'] and not left['receiving'] and right['receiving']
@@ -145,7 +150,7 @@ def run():
             assert hashlib.sha256((receiver.output / 'été/nested/photo.bin').read_bytes()).digest() == hashlib.sha256(content).digest()
             assert (receiver.output / 'été/empty-directory').is_dir()
             assert (receiver.output / 'été/empty.txt').read_bytes() == b''
-            print('PASS browser-to-browser encrypted sharing, matching consent, UTF-8 and empty folders')
+            print('PASS manual hostname transfer despite occupied discovery port, matching consent, UTF-8 and empty folders')
 
             sender.prepare('declined.txt', [('declined.txt', b'must not arrive')])
             sender.request('/api/send', {'to': '127.0.0.1:' + str(receiver.port)})

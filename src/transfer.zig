@@ -42,27 +42,34 @@ pub fn connect(io: Io, host: []const u8, port: u16) !Io.net.Stream {
         .expired => error.Timeout,
     };
 }
-fn connectInner(io: Io, host: []const u8, port: u16) !Io.net.Stream {
-    if (host.len > 0 and host[0] == '[') {
-        const end = std.mem.findScalar(u8, host, ']') orelse return error.InvalidAddress;
-        const suffix = host[end + 1 ..];
-        const endpoint_port = if (suffix.len == 0) port else blk: {
-            if (suffix[0] != ':') return error.InvalidAddress;
-            const parsed = std.fmt.parseInt(u16, suffix[1..], 10) catch return error.InvalidPort;
-            if (parsed == 0) return error.InvalidPort;
-            break :blk parsed;
-        };
-        // resolve (rather than parse) supports link-local interface scopes.
-        const address = try Io.net.IpAddress.resolve(io, host[1..end], endpoint_port);
-        return address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+const Endpoint = struct { host: []const u8, port: u16 };
+fn parseEndpoint(input: []const u8, default_port: u16) !Endpoint {
+    if (input.len == 0) return error.InvalidAddress;
+    var host = input;
+    var port_text: ?[]const u8 = null;
+    if (input[0] == '[') {
+        const end = std.mem.findScalar(u8, input, ']') orelse return error.InvalidAddress;
+        host = input[1..end];
+        if (end + 1 < input.len) {
+            if (input[end + 1] != ':') return error.InvalidAddress;
+            port_text = input[end + 2 ..];
+        }
+    } else if (std.mem.count(u8, input, ":") == 1) {
+        const colon = std.mem.findScalar(u8, input, ':').?;
+        host = input[0..colon];
+        port_text = input[colon + 1 ..];
     }
-    if (Io.net.IpAddress.resolve(io, host, port)) |address| return address.connect(io, .{ .mode = .stream, .protocol = .tcp }) else |_| {}
-    if (Io.net.IpAddress.parseLiteral(host)) |parsed| {
-        var address = parsed;
-        if (address.getPort() == 0) address.setPort(port);
+    if (host.len == 0) return error.InvalidAddress;
+    const port = if (port_text) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort else default_port;
+    if (port == 0) return error.InvalidPort;
+    return .{ .host = host, .port = port };
+}
+fn connectInner(io: Io, host: []const u8, port: u16) !Io.net.Stream {
+    const endpoint = try parseEndpoint(host, port);
+    if (Io.net.IpAddress.resolve(io, endpoint.host, endpoint.port)) |address| {
         return address.connect(io, .{ .mode = .stream, .protocol = .tcp });
     } else |_| {}
-    return (try Io.net.HostName.init(host)).connect(io, port, .{ .mode = .stream, .protocol = .tcp });
+    return (try Io.net.HostName.init(endpoint.host)).connect(io, endpoint.port, .{ .mode = .stream, .protocol = .tcp });
 }
 
 pub fn send(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, plan: manifest.Plan, options: Options) !void {
@@ -244,7 +251,9 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
     defer a.free(final_name);
     // Once published, delivery is committed even if the acknowledgement is lost.
     try options.reporter.event("received", final_name, received, offer.total);
-    try channel.send(.delivered, final_name);
+    // Publication commits the receive. A missing acknowledgement leaves only
+    // the sender uncertain; never report this saved selection as failed.
+    channel.send(.delivered, final_name) catch {};
 }
 
 fn writeAndHash(file: Io.File, io: Io, chunk: []const u8, position: u64, hash: *manifest.Sha256) anyerror!void {
@@ -319,4 +328,15 @@ test "collision suffixes stay within portable UTF-8 limits" {
     defer a.free(result);
     try paths.validateName(result);
     try std.testing.expect(result.len <= 255);
+}
+
+test "endpoint ports are parsed before DNS validation" {
+    const endpoint = try parseEndpoint("computer.local:9100", 9000);
+    try std.testing.expectEqualStrings("computer.local", endpoint.host);
+    try std.testing.expectEqual(@as(u16, 9100), endpoint.port);
+    try std.testing.expectEqualStrings("::1", (try parseEndpoint("[::1]:9100", 9000)).host);
+    try std.testing.expectEqual(@as(u16, 9000), (try parseEndpoint("::1", 9000)).port);
+    for ([_][]const u8{ "host:", "host:0", "host:65536", "host:bad", "[::1]bad", ":9100", "[]" }) |invalid| {
+        try std.testing.expect(if (parseEndpoint(invalid, 9000)) |_| false else |_| true);
+    }
 }

@@ -9,17 +9,33 @@ pub const Peer = struct { name: []const u8, address: Io.net.IpAddress, instance:
 pub const max_peers = 64;
 
 pub fn bind(io: Io, address: Io.net.IpAddress) !Io.net.Socket {
-    return address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    return listenAddress(address).bind(io, .{ .mode = .dgram, .protocol = .udp });
+}
+
+fn listenAddress(address: Io.net.IpAddress) Io.net.IpAddress {
+    // Receive broadcasts on unicast interfaces while leaving TCP restricted.
+    return if (address == .ip4 and address.ip4.bytes[0] != 127)
+        .{ .ip4 = .unspecified(address.getPort()) }
+    else
+        address;
 }
 
 /// Respond only to discovery queries. No scanning, passive permanent
 /// advertisements, remote address supplied in packets, or file metadata.
-pub fn serve(io: Io, socket: Io.net.Socket, port: u16, name: []const u8, instance: [16]u8) void {
-    serveInner(io, socket, port, name, instance) catch |err| {
+pub fn serve(io: Io, socket: Io.net.Socket, address: Io.net.IpAddress, port: u16, name: []const u8, instance: [16]u8) void {
+    serveInner(io, socket, address, port, name, instance) catch |err| {
         if (err != error.Canceled) std.log.warn("Nearby discovery stopped: {s}", .{@errorName(err)});
     };
 }
-fn serveInner(io: Io, socket: Io.net.Socket, port: u16, name: []const u8, instance: [16]u8) !void {
+fn serveInner(io: Io, socket: Io.net.Socket, address: Io.net.IpAddress, port: u16, name: []const u8, instance: [16]u8) !void {
+    var response_socket: ?Io.net.Socket = null;
+    defer if (response_socket) |bound| bound.close(io);
+    if (!address.eql(&socket.address)) {
+        var source = address;
+        source.setPort(0);
+        response_socket = try source.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    }
+    const responder = response_socket orelse socket;
     var input: [256]u8 = undefined;
     var reply: [106]u8 = undefined;
     @memcpy(reply[0..8], reply_magic);
@@ -31,7 +47,7 @@ fn serveInner(io: Io, socket: Io.net.Socket, port: u16, name: []const u8, instan
         const request = try socket.receive(io, &input);
         if (request.flags.trunc or request.data.len != 24 or !std.mem.eql(u8, request.data[0..8], query_magic)) continue;
         @memcpy(reply[8..24], request.data[8..24]);
-        net_io.sendTimeout(socket, io, &request.from, reply[0 .. 43 + name.len], wire.timeout(1)) catch |err| {
+        net_io.sendTimeout(responder, io, &request.from, reply[0 .. 43 + name.len], wire.timeout(1)) catch |err| {
             if (err == error.Canceled) return err;
         };
         // Bound amplification and CPU use from a noisy local host.
@@ -104,4 +120,12 @@ test "discovery binds reply to nonce and packet source" {
     try std.testing.expectError(error.InvalidAnnouncement, parseReply(std.testing.allocator, &packet, @splat(2), peer.address));
     packet[43] = 27;
     try std.testing.expectError(error.InvalidName, parseReply(std.testing.allocator, &packet, @splat(1), peer.address));
+}
+
+test "unicast discovery listens for broadcasts but loopback stays private" {
+    const selected: Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 192, 168, 1, 20 }, .port = 9000 } };
+    const wildcard: Io.net.IpAddress = .{ .ip4 = .unspecified(9000) };
+    try std.testing.expect(listenAddress(selected).eql(&wildcard));
+    const loopback: Io.net.IpAddress = .{ .ip4 = .loopback(9000) };
+    try std.testing.expect(listenAddress(loopback).eql(&loopback));
 }

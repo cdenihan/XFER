@@ -13,6 +13,7 @@ let current = null;
 let preparing = false;
 let pendingId = null;
 let disconnected = false;
+let pollFailed = false;
 let localError = null;
 let renderedPeers = null;
 
@@ -71,7 +72,7 @@ function notice(message) {
 }
 
 function updateControls() {
-  const busy = preparing || current?.busy || disconnected;
+  const busy = preparing || current?.busy || disconnected || pollFailed;
   for (const id of ['choose', 'choose-folder', 'clear']) element(id).disabled = busy;
   element('send').disabled = busy || !selection || !destination;
   element('send-hint').textContent = destination
@@ -209,19 +210,24 @@ element('send').onclick = async () => {
   preparing = true;
   localError = null;
   updateControls();
+  let uploadCreated = false;
   try {
     await api('new', { name: selection.root, folder: selection.folder, total: selection.items.reduce((bytes, item) => bytes + (item.file?.size || 0), 0) });
+    uploadCreated = true;
     for (const item of selection.items) {
       if (item.directory) await api('directory', { path: item.path });
       else await api('upload', item.file, 'PUT', { 'X-Xfer-Path': encodeURIComponent(item.path) });
     }
     await api('send', { to: destination.address });
+    uploadCreated = false;
     selection = null;
     element('selection').textContent = 'Drop files or a folder here';
     element('selection-detail').textContent = 'Your files stay between these two computers.';
     element('clear').hidden = true;
   } catch (error) {
-    try { await api('cancel', {}); } catch { }
+    if (uploadCreated) {
+      try { await api('cancel', {}); } catch { }
+    }
     notice(error.message === 'Failed to fetch' ? 'File preparation was interrupted. Select the files and try again.' : error.message);
   } finally {
     preparing = false;
@@ -305,6 +311,7 @@ async function poll() {
   if (disconnected) return;
   try {
     current = await api('state', undefined, 'GET');
+    if (pollFailed) { localError = null; pollFailed = false; element('status').hidden = true; }
     element('identity').textContent = current.name;
     element('destination').textContent = 'Saved to ' + current.output;
     element('online').textContent = current.busy ? 'Sharing in progress' : 'Ready to receive';
@@ -313,9 +320,9 @@ async function poll() {
     showApproval(current.pending);
     updateControls();
   } catch {
-    disconnected = true;
-    element('online').textContent = 'Disconnected';
-    notice('XFER is no longer running. Launch it again to reconnect.');
+    pollFailed = true;
+    element('online').textContent = 'Reconnecting…';
+    notice('Connection interrupted. Retrying…');
     updateControls();
   }
   setTimeout(poll, 600);
