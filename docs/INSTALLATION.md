@@ -41,12 +41,12 @@ matching your OS and CPU and its `.sha256` sidecar. Verify before extracting:
 
 ```sh
 # Linux
-sha256sum -c xfer-1.0.0-x86_64-linux-musl.tar.gz.sha256
+sha256sum -c xfer-2.0.0-x86_64-linux-musl.tar.gz.sha256
 # macOS
-shasum -a 256 -c xfer-1.0.0-aarch64-macos.tar.gz.sha256
+shasum -a 256 -c xfer-2.0.0-aarch64-macos.tar.gz.sha256
 ```
 
-PowerShell: `Get-FileHash .\xfer-1.0.0-x86_64-windows.zip -Algorithm SHA256`
+PowerShell: `Get-FileHash .\xfer-2.0.0-x86_64-windows.zip -Algorithm SHA256`
 and compare its hash with the sidecar. Extract and place the executable on PATH.
 Old Rust release archives are incompatible with the Zig wire protocol.
 This checkout has not itself published a new release.

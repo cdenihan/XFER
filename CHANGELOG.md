@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 — Zig redesign
+## 2.0.0 — Zig redesign
 
 - Initialized a new project with `zig init` using Zig 0.17.0.
 - Replaced the Rust application and all runtime dependencies with Zig.
@@ -19,6 +19,14 @@
 - Added unit and real process/network integration tests, native CI on Windows,
   macOS and Linux, six cross-build targets, and checksumed release archives.
 - Added reproducible Rust/Zig LAN benchmarks against the requested Linux host.
+- Pipeline large-file disk/hash work with encryption/network work, retain
+  bounded buffers, and encrypt records in place.
+- Restrict discovery to the selected bind address and rate-limit malformed
+  traffic; keep manual transfers available when discovery cannot start.
+- Make scanning, uploads and transfers cancellable, preserve committed receive
+  results, and recover browser polling, approval retries and listener accepts.
+- Enforce complete manifest and staged-entry limits before transfer, and clean
+  up benchmark receivers that fail to become ready.
 - Removed old protocol compatibility, sync/delta/reconciliation commands,
   remembered-peer configuration, self-update, Rust toolkit release integration,
   and the previous terminal framework.
