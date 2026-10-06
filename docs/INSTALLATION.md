@@ -1,122 +1,84 @@
-# Installing XFER
+# Installation
 
-Official releases provide binaries and checksum files for:
+## From source
 
-| Operating system | Architectures | Runtime |
-| --- | --- | --- |
-| Linux | x86_64, ARM64 | GNU libc and musl |
-| macOS | Intel, Apple Silicon | native |
-| Windows | x86_64, ARM64 | MSVC |
+Install [Zig 0.17.0](https://ziglang.org/download/) for your computer.
+Clone the repository, then build:
 
-The installers download only from HTTPS by default, verify the release
-SHA-256 file before replacing anything, run the downloaded binary as a
-compatibility check, and install through a temporary file so a failed upgrade
-does not destroy the existing executable.
-
-## Updating an existing installation
-
-After installing an official release, update the executable currently being
-used by your shell:
-
-```console
-xfer update
-xfer update --version 2026.07.16.2
+```sh
+zig build -Doptimize=ReleaseSafe
 ```
 
-The command resolves the running executable and reads the latest release's
-`VERSION` asset. If that version is already installed, XFER reports that it is
-current and leaves the executable untouched. Otherwise it downloads the latest
-platform installer and checksum, verifies SHA-256, and asks that installer to
-replace XFER in the same directory. On Windows, the command starts a helper that
-waits for the running `xfer.exe` process to exit before completing the
-replacement. Use `--version` to pin the installation to a specific published
-release; requesting the installed version is also a no-op.
+macOS/Linux executable: `zig-out/bin/xfer`. Windows: `zig-out/bin/xfer.exe`.
+The resulting executable needs no Zig installation on the recipient's computer.
 
-During transfers, current XFER releases exchange their release versions. When
-they differ, the older interactive CLI offers to update to the newer peer's
-exact release after the transfer completes. Non-interactive sessions print the
-command to run, while `--json` emits a `version_mismatch` event.
+For a local user installation on macOS/Linux:
 
-`XFER_REPOSITORY` and `XFER_RELEASE_BASE_URL` apply to updates as well as initial
-installation. The target directory must be writable by the current user.
-
-## Linux and macOS
-
-Install the latest release:
-
-```console
-curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh | sh
+```sh
+mkdir -p "$HOME/.local/bin"
+cp zig-out/bin/xfer "$HOME/.local/bin/xfer"
 ```
 
-The default destination is `~/.local/bin/xfer`. If that directory is not in
-`PATH`, the installer prints the directory to add.
+Add `$HOME/.local/bin` to your PATH if needed.
 
-On Linux, the installer selects the musl binary by default. This avoids a
-dependency on the host system's glibc version while retaining the GNU builds
-for users who need them. Select the GNU binary explicitly with `--libc gnu`:
+On Windows copy `zig-out\bin\xfer.exe` to a user-owned directory such as
+`$env:LOCALAPPDATA\XFER` and add that directory to your user PATH. Close a running
+receiver before replacing its executable.
 
-```console
-curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh \
-  | sh -s -- --libc gnu
+## Release archives
+
+The new release pipeline produces these targets:
+
+| Platform | Targets |
+| --- | --- |
+| Linux | `x86_64-linux-musl`, `aarch64-linux-musl` |
+| macOS | `x86_64-macos`, `aarch64-macos` |
+| Windows | `x86_64-windows`, `aarch64-windows` |
+
+After a Zig release is published on the repository's
+[releases page](https://github.com/cdenihan/XFER/releases), download the archive
+matching your OS and CPU and its `.sha256` sidecar. Verify before extracting:
+
+```sh
+# Linux
+sha256sum -c xfer-1.0.0-x86_64-linux-musl.tar.gz.sha256
+# macOS
+shasum -a 256 -c xfer-1.0.0-aarch64-macos.tar.gz.sha256
 ```
 
-Pin a release or choose another destination:
+PowerShell: `Get-FileHash .\xfer-1.0.0-x86_64-windows.zip -Algorithm SHA256`
+and compare its hash with the sidecar. Extract and place the executable on PATH.
+Old Rust release archives are incompatible with the Zig wire protocol.
+This checkout has not itself published a new release.
 
-```console
-curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh \
-  | sh -s -- --version v2026.07.16.2 --install-dir "$HOME/bin"
-```
+## Open the sharing window
 
-Equivalent environment variables are `XFER_VERSION`, `XFER_INSTALL_DIR`, and
-`XFER_LIBC`. Set `XFER_LIBC=gnu` for the GNU override. The script requires
-`curl` or `wget`, plus one of `sha256sum`, `shasum`, or `openssl`.
+Launch `xfer` with no arguments, or double-click `xfer.exe` on Windows. It opens
+the default browser and starts receiving. No Node.js, Python, web server package,
+or downloaded frontend is needed to run XFER. On desktop Linux the standard
+`xdg-open` launcher opens your browser; if the launcher is unavailable, use
+`xfer --no-open` and open the printed URL yourself. Terminal-only/headless hosts
+can use `xfer receive` and `xfer send` instead.
 
-## Windows
+Use `--name "Office PC"` for a friendly discovery label and `--output DIR` to
+choose a destination. Otherwise the computer hostname and Downloads/XFER are
+used. The printed browser URL contains a private launch capability; keep it
+local. Closing the browser tab does not stop the receiver. Use **Quit XFER**
+or stop its process to exit.
 
-Install the latest release from PowerShell:
+## Network access
 
-```powershell
-irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 | iex
-```
+Run XFER on two computers on the same reachable IP network. Allow its receiving
+TCP port through the firewall. Allow UDP on that port for nearby discovery.
+Both default to 9000; use the same `--port` on both computers to change it.
 
-The default destination is
-`%LOCALAPPDATA%\Programs\XFER\bin\xfer.exe`. The installer adds that directory
-to the current user's `PATH`; open a new terminal afterward.
+The default receiver binds IPv4 interfaces. Restrict it with `--bind ADDRESS`.
+IPv6 direct transfers use `receive --bind :: --no-discovery`. Nearby discovery
+uses IPv4 broadcast and cannot cross routed subnets. For multicast/broadcast
+filtered networks, manually enter the receiving computer's address with `--to`.
 
-To pin a version or suppress the PATH update, save and invoke the script:
-
-```powershell
-$installer = Join-Path $env:TEMP "install-xfer.ps1"
-irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 -OutFile $installer
-& $installer -Version v2026.07.16.42 -InstallDir "$HOME\bin" -NoModifyPath
-```
-
-Equivalent environment variables are `XFER_VERSION` and `XFER_INSTALL_DIR`.
-The script supports Windows PowerShell 5.1 and newer PowerShell releases.
-
-## Mirrors and private release proxies
-
-Set `XFER_RELEASE_BASE_URL` to a release root with the same layout as GitHub
-Releases:
-
-```text
-<base>/latest/download/<artifact>
-<base>/download/<tag>/<artifact>
-```
-
-Set `XFER_REPOSITORY` to change the GitHub owner/repository while retaining the
-standard GitHub release URL. Non-HTTPS network downloads are rejected; local
-`file://` URLs are supported for offline testing.
-
-## Manual installation
-
-Download the binary and matching `.sha256` file from the GitHub release page.
-Verify SHA-256, rename the binary to `xfer` (`xfer.exe` on Windows), make it
-executable on Unix, and place it in a directory on `PATH`.
-
-Run these checks afterward:
-
-```console
-xfer --version
-xfer doctor
-```
+The default output is the user's `Downloads/XFER` directory. The receiver creates
+it if needed. `--output DIR` chooses another writable destination. Each item
+requires enough free disk space to stage the complete transfer. Browser senders
+also need temporary disk space for the selected files. Existing items
+are preserved; there is no implicit overwrite or merge.

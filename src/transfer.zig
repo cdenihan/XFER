@@ -1,0 +1,375 @@
+const std = @import("std");
+const Io = std.Io;
+const paths = @import("paths.zig");
+const manifest = @import("manifest.zig");
+const wire = @import("wire.zig");
+const Reporter = @import("reporter.zig").Reporter;
+// Keep the 64 KiB wire format, but amortize disk operations for bulk files.
+// Small files use the existing buffer and need no additional allocation.
+const bulk_threshold = 1024 * 1024;
+const bulk_buffer_size = 1024 * 1024;
+const confirm = @import("reporter.zig").confirm;
+
+pub const Options = struct {
+    token: []const u8 = "",
+    yes: bool = false,
+    max_bytes: u64 = 16 * 1024 * 1024 * 1024,
+    reporter: Reporter,
+    approval: ?Approval = null,
+    pub const Approval = struct {
+        context: *anyopaque,
+        ask: *const fn (*anyopaque, [12]u8, manifest.Offer, bool) anyerror!bool,
+    };
+};
+pub fn connect(io: Io, host: []const u8, port: u16) !Io.net.Stream {
+    // Zig 0.17's Threaded backend does not implement ConnectOptions.timeout.
+    // Race a cancellable connect against a timer, closing any losing stream.
+    const Result = union(enum) { connected: anyerror!Io.net.Stream, expired: Io.Cancelable!void };
+    var results: [2]Result = undefined;
+    var select = Io.Select(Result).init(io, &results);
+    defer while (select.cancel()) |pending| {
+        switch (pending) {
+            .connected => |result| {
+                if (result) |stream| stream.close(io) else |_| {}
+            },
+            .expired => {},
+        }
+    };
+    try select.concurrent(.connected, connectInner, .{ io, host, port });
+    try select.concurrent(.expired, Io.sleep, .{ io, Io.Duration.fromSeconds(10), Io.Clock.awake });
+    return switch (try select.await()) {
+        .connected => |result| result,
+        .expired => error.Timeout,
+    };
+}
+const Endpoint = struct { host: []const u8, port: u16 };
+fn parseEndpoint(input: []const u8, default_port: u16) !Endpoint {
+    if (input.len == 0) return error.InvalidAddress;
+    var host = input;
+    var port_text: ?[]const u8 = null;
+    if (input[0] == '[') {
+        const end = std.mem.findScalar(u8, input, ']') orelse return error.InvalidAddress;
+        host = input[1..end];
+        if (end + 1 < input.len) {
+            if (input[end + 1] != ':') return error.InvalidAddress;
+            port_text = input[end + 2 ..];
+        }
+    } else if (std.mem.count(u8, input, ":") == 1) {
+        const colon = std.mem.findScalar(u8, input, ':').?;
+        host = input[0..colon];
+        port_text = input[colon + 1 ..];
+    }
+    if (host.len == 0) return error.InvalidAddress;
+    const port = if (port_text) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort else default_port;
+    if (port == 0) return error.InvalidPort;
+    return .{ .host = host, .port = port };
+}
+fn connectInner(io: Io, host: []const u8, port: u16) !Io.net.Stream {
+    const endpoint = try parseEndpoint(host, port);
+    if (Io.net.IpAddress.resolve(io, endpoint.host, endpoint.port)) |address| {
+        return address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    } else |_| {}
+    return (try Io.net.HostName.init(endpoint.host)).connect(io, endpoint.port, .{ .mode = .stream, .protocol = .tcp });
+}
+
+pub fn send(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, plan: manifest.Plan, options: Options) !void {
+    var channel = try wire.Channel.init(stream, io, .sender, options.token);
+    defer channel.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(a, plan.offer, .{});
+    defer a.free(encoded);
+    if (encoded.len > manifest.max_encoded) return error.ManifestTooLarge;
+    var digest: [32]u8 = undefined;
+    manifest.Sha256.hash(encoded, &digest, .{});
+    var size: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size, @intCast(encoded.len), .little);
+    try channel.send(.offer, &size);
+    var offset: usize = 0;
+    while (offset < encoded.len) {
+        const n = @min(encoded.len - offset, wire.max_payload);
+        try channel.send(.manifest, encoded[offset..][0..n]);
+        offset += n;
+    }
+    try consent(&channel, options, plan.offer, false);
+    var buffer: [wire.max_payload]u8 = undefined;
+    var sent: u64 = 0;
+    var reported: u64 = 0;
+    for (plan.offer.entries) |entry| {
+        if (entry.kind == .directory) continue;
+        const file = try paths.openFile(plan.source, io, entry.path);
+        defer file.close(io);
+        if ((try file.stat(io)).size != entry.size) return error.SourceChanged;
+        const bulk = if (entry.size >= bulk_threshold) try a.alloc(u8, 2 * bulk_buffer_size) else null;
+        defer if (bulk) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            a.free(bytes);
+        };
+        var current: []u8 = if (bulk) |bytes| bytes[0..bulk_buffer_size] else &buffer;
+        var spare: []u8 = if (bulk) |bytes| bytes[bulk_buffer_size..] else &buffer;
+        var hash = manifest.Sha256.init(.{});
+        var position: u64 = 0;
+        if (entry.size != 0) try readAndHash(file, io, current[0..@min(current.len, entry.size)], 0, &hash);
+        while (position < entry.size) {
+            const chunk = current[0..@min(current.len, entry.size - position)];
+            const next_position = position + chunk.len;
+            // Only the worker touches the hash while sending the previous block.
+            // async falls back to synchronous execution if concurrency is unavailable.
+            var next: ?Io.Future(anyerror!void) = if (bulk != null and next_position < entry.size)
+                io.async(readAndHash, .{ file, io, spare[0..@min(spare.len, entry.size - next_position)], next_position, &hash })
+            else
+                null;
+            // Cancel and join before the file, hash or buffers leave scope.
+            defer if (next) |*task| task.cancel(io) catch {};
+            var record_offset: usize = 0;
+            while (record_offset < chunk.len) {
+                const n = @min(wire.max_payload, chunk.len - record_offset);
+                try channel.send(.data, chunk[record_offset..][0..n]);
+                record_offset += n;
+            }
+            position = next_position;
+            sent += chunk.len;
+            if (sent - reported >= 4 * 1024 * 1024) {
+                try options.reporter.event("progress", entry.path, sent, plan.offer.total);
+                reported = sent;
+            }
+            if (next) |*task| {
+                try task.await(io);
+                std.mem.swap([]u8, &current, &spare);
+            } else if (position < entry.size) {
+                try readAndHash(file, io, current[0..@min(current.len, entry.size - position)], position, &hash);
+            }
+        }
+        if (!std.mem.eql(u8, &hash.finalResult(), &entry.hash) or (try file.stat(io)).size != entry.size) return error.SourceChanged;
+    }
+    try channel.send(.finish, &digest);
+    const delivered = try channel.expect(.delivered);
+    if (delivered.len == 0 or delivered.len > 255) return error.InvalidRecord;
+    try paths.validateName(delivered);
+    try options.reporter.event("sent", delivered, sent, plan.offer.total);
+}
+
+fn readAndHash(file: Io.File, io: Io, chunk: []u8, position: u64, hash: *manifest.Sha256) anyerror!void {
+    if (try file.readPositionalAll(io, chunk, position) != chunk.len) return error.SourceChanged;
+    hash.update(chunk);
+}
+
+pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.Dir, options: Options) !void {
+    var channel = try wire.Channel.init(stream, io, .receiver, options.token);
+    defer channel.deinit();
+    const offer_header = try channel.expect(.offer);
+    if (offer_header.len != 4) return error.InvalidManifest;
+    const size = std.mem.readInt(u32, offer_header[0..4], .little);
+    if (size == 0 or size > manifest.max_encoded) return error.ManifestTooLarge;
+    const encoded = try a.alloc(u8, size);
+    defer a.free(encoded);
+    var offset: usize = 0;
+    while (offset < size) {
+        const record = try channel.expect(.manifest);
+        if (record.len == 0 or record.len > size - offset) return error.InvalidManifest;
+        @memcpy(encoded[offset..][0..record.len], record);
+        offset += record.len;
+    }
+    var digest: [32]u8 = undefined;
+    manifest.Sha256.hash(encoded, &digest, .{});
+    const parsed = try std.json.parseFromSlice(manifest.Offer, a, encoded, .{ .allocate = .alloc_always, .max_value_len = paths.max_path });
+    defer parsed.deinit();
+    const offer = parsed.value;
+    try manifest.validate(a, offer, options.max_bytes);
+    try consent(&channel, options, offer, true);
+    // Staging is a fresh private directory on the destination filesystem.
+    // All creates are exclusive and publication never replaces an existing item.
+    var random: [16]u8 = undefined;
+    try io.randomSecure(&random);
+    const stage_name = try std.fmt.allocPrint(a, ".xfer-{s}.part", .{std.fmt.bytesToHex(random, .lower)});
+    defer a.free(stage_name);
+    try output.createDir(io, stage_name, privateDirPermissions());
+    defer cleanupStage(output, io, stage_name);
+    const stage = try output.openDir(io, stage_name, .{ .follow_symlinks = false });
+    defer stage.close(io);
+    var received: u64 = 0;
+    var reported: u64 = 0;
+    for (offer.entries) |entry| {
+        const p = try paths.parent(stage, io, entry.path);
+        defer p.close(io);
+        if (entry.kind == .directory) {
+            try p.dir.createDir(io, p.name, privateDirPermissions());
+            continue;
+        }
+        const file = try p.dir.createFile(io, p.name, .{ .exclusive = true, .permissions = privateFilePermissions() });
+        defer file.close(io);
+        const bulk = if (entry.size >= bulk_threshold) try a.alloc(u8, 2 * bulk_buffer_size) else null;
+        defer if (bulk) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            a.free(bytes);
+        };
+        var current: []u8 = if (bulk) |bytes| bytes[0..bulk_buffer_size] else &.{};
+        var spare: []u8 = if (bulk) |bytes| bytes[bulk_buffer_size..] else &.{};
+        var buffered: usize = 0;
+        var written: u64 = 0;
+        var hash = manifest.Sha256.init(.{});
+        var pending: ?Io.Future(anyerror!void) = null;
+        defer if (pending) |*task| task.cancel(io) catch {};
+        var position: u64 = 0;
+        while (position < entry.size) {
+            const chunk = try channel.expect(.data);
+            if (chunk.len == 0 or chunk.len > entry.size - position) return error.InvalidRecord;
+            if (bulk != null) {
+                // Peers may send arbitrary short records; do not assume alignment.
+                if (chunk.len > current.len - buffered) {
+                    if (pending) |*task| try task.await(io);
+                    pending = io.async(writeAndHash, .{ file, io, current[0..buffered], written, &hash });
+                    written += buffered;
+                    buffered = 0;
+                    std.mem.swap([]u8, &current, &spare);
+                }
+                @memcpy(current[buffered..][0..chunk.len], chunk);
+                buffered += chunk.len;
+                if (buffered == current.len) {
+                    if (pending) |*task| try task.await(io);
+                    pending = io.async(writeAndHash, .{ file, io, current, written, &hash });
+                    written += buffered;
+                    buffered = 0;
+                    std.mem.swap([]u8, &current, &spare);
+                }
+            } else {
+                try writeAndHash(file, io, chunk, position, &hash);
+            }
+            position += chunk.len;
+            received += chunk.len;
+            if (received - reported >= 4 * 1024 * 1024) {
+                try options.reporter.event("progress", entry.path, received, offer.total);
+                reported = received;
+            }
+        }
+        if (pending) |*task| try task.await(io);
+        if (buffered != 0) try writeAndHash(file, io, current[0..buffered], written, &hash);
+        if (!std.mem.eql(u8, &hash.finalResult(), &entry.hash)) return error.IntegrityMismatch;
+        try file.sync(io);
+    }
+    const finished = try channel.expect(.finish);
+    if (!std.mem.eql(u8, finished, &digest) or received != offer.total) return error.IntegrityMismatch;
+    const final_name = try publish(a, io, stage, output, offer.name);
+    defer a.free(final_name);
+    // Once published, delivery is committed even if the acknowledgement is lost.
+    try reportReceived(io, options.reporter, final_name, received, offer.total);
+    // Publication commits the receive. A missing acknowledgement leaves only
+    // the sender uncertain; never report this saved selection as failed.
+    channel.send(.delivered, final_name) catch {};
+}
+
+fn reportReceived(io: Io, reporter: Reporter, name: []const u8, bytes: u64, total: u64) !void {
+    const previous = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(previous);
+    try reporter.event("received", name, bytes, total);
+}
+
+test "committed receive reporting blocks pending cancellation and restores protection" {
+    const Mock = struct {
+        protection: Io.CancelProtection = .unblocked,
+        reported: bool = false,
+        fn swap(context: ?*anyopaque, next: Io.CancelProtection) Io.CancelProtection {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const previous = self.protection;
+            self.protection = next;
+            return previous;
+        }
+        fn emit(context: *anyopaque, event: []const u8, _: []const u8, _: u64, _: u64) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.protection != .blocked) return error.Canceled;
+            try std.testing.expectEqualStrings("received", event);
+            self.reported = true;
+        }
+    };
+    var mock: Mock = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.swapCancelProtection = Mock.swap;
+    const io: Io = .{ .userdata = &mock, .vtable = &vtable };
+    const reporter: Reporter = .{ .io = io, .sink = .{ .context = &mock, .emit = Mock.emit } };
+    try reportReceived(io, reporter, "saved", 4, 4);
+    try std.testing.expect(mock.reported);
+    try std.testing.expectEqual(Io.CancelProtection.unblocked, mock.protection);
+}
+
+fn writeAndHash(file: Io.File, io: Io, chunk: []const u8, position: u64, hash: *manifest.Sha256) anyerror!void {
+    hash.update(chunk);
+    try file.writePositionalAll(io, chunk, position);
+}
+
+fn consent(channel: *wire.Channel, options: Options, offer: manifest.Offer, receiving: bool) !void {
+    channel.setPhaseTimeout(300);
+    if (options.yes and options.token.len < 16) return error.SharedSecretRequired;
+    var buffer: [1024]u8 = undefined;
+    const summary = try std.fmt.bufPrint(&buffer, "{s} {s}: {d} entries, {d} bytes. Compare code {s}-{s}-{s} on both devices.", .{
+        if (receiving) "Receive" else "Send", offer.name,         offer.entries.len,   offer.total,
+        channel.code[0..4],                   channel.code[4..8], channel.code[8..12],
+    });
+    try options.reporter.event("offer", summary, 0, offer.total);
+    const approved = if (options.approval) |approval| try approval.ask(approval.context, channel.code, offer, receiving) else options.yes or (!options.reporter.json and (try confirm(channel.io, "Codes match and transfer approved? [y/N] ")));
+    if (!approved) {
+        try channel.send(.reject, "");
+        return error.Declined;
+    }
+    try channel.send(.accept, "");
+    if ((try channel.expect(.accept)).len != 0) return error.InvalidRecord;
+    channel.setPhaseTimeout(24 * 60 * 60);
+    try options.reporter.event("accepted", "Both devices approved. Transferring…", 0, offer.total);
+}
+
+fn publish(a: std.mem.Allocator, io: Io, stage: Io.Dir, output: Io.Dir, name: []const u8) ![]u8 {
+    var number: usize = 0;
+    while (number < 10_000) : (number += 1) {
+        const candidate = if (number == 0) try a.dupe(u8, name) else try collisionName(a, name, number);
+        stage.renamePreserve(name, output, candidate, io) catch |err| {
+            a.free(candidate);
+            if (err == error.PathAlreadyExists) continue;
+            return err;
+        };
+        return candidate;
+    }
+    return error.TooManyCollisions;
+}
+fn collisionName(a: std.mem.Allocator, name: []const u8, number: usize) ![]u8 {
+    // Long UTF-8 names are shortened at a codepoint boundary to make room.
+    const suffix = try std.fmt.allocPrint(a, " ({d})", .{number});
+    defer a.free(suffix);
+    var end = @min(name.len, 255 - suffix.len);
+    while (end > 0 and !std.unicode.utf8ValidateSlice(name[0..end])) end -= 1;
+    return std.fmt.allocPrint(a, "{s}{s}", .{ name[0..end], suffix });
+}
+fn cleanupStage(output: Io.Dir, io: Io, name: []const u8) void {
+    // User cancellation must still finish removing a partial transfer.
+    const previous = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(previous);
+    output.deleteTree(io, name) catch {};
+}
+fn privateDirPermissions() Io.File.Permissions {
+    if (@import("builtin").os.tag == .windows) return .default_dir;
+    return .fromMode(0o700);
+}
+fn privateFilePermissions() Io.File.Permissions {
+    if (@import("builtin").os.tag == .windows) return .default_file;
+    return .fromMode(0o600);
+}
+
+test "collision suffixes stay within portable UTF-8 limits" {
+    const a = std.testing.allocator;
+    var name: [254]u8 = undefined;
+    for (0..127) |i| {
+        name[i * 2] = 0xc3;
+        name[i * 2 + 1] = 0xa9;
+    }
+    const result = try collisionName(a, &name, 123);
+    defer a.free(result);
+    try paths.validateName(result);
+    try std.testing.expect(result.len <= 255);
+}
+
+test "endpoint ports are parsed before DNS validation" {
+    const endpoint = try parseEndpoint("computer.local:9100", 9000);
+    try std.testing.expectEqualStrings("computer.local", endpoint.host);
+    try std.testing.expectEqual(@as(u16, 9100), endpoint.port);
+    try std.testing.expectEqualStrings("::1", (try parseEndpoint("[::1]:9100", 9000)).host);
+    try std.testing.expectEqual(@as(u16, 9000), (try parseEndpoint("::1", 9000)).port);
+    for ([_][]const u8{ "host:", "host:0", "host:65536", "host:bad", "[::1]bad", ":9100", "[]" }) |invalid| {
+        try std.testing.expect(if (parseEndpoint(invalid, 9000)) |_| false else |_| true);
+    }
+}

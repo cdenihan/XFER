@@ -1,177 +1,136 @@
-# Development guide
-
-## Project shape
-
-XFER is one package with a library and a thin binary:
-
-| Module | Responsibility |
-| --- | --- |
-| `cli` | clap command model and command dispatch |
-| `control` | cooperative cancellation and shutdown of blocked transfer sockets |
-| `config` | identity, permissions, and TOFU peer persistence |
-| `crypto` | key derivation, fingerprints, SAS, and AEAD helpers |
-| `discovery` | TTL-1 multicast receiver announcements and passive browsing |
-| `filesystem` | source planning, exclusions, safe paths, destination naming |
-| `net` | dual-stack listeners, address discovery, and connection setup |
-| `protocol` | negotiation, typed messages, and framed record transport |
-| `reporter` | presentation-neutral status, progress, and trust prompts |
-| `transfer` | connection, trust handshake, sending, and receive orchestration |
-| `receiver` | frame state machine, path registry, totals, and verification |
-| `storage` | private staging, collision naming, publication, and overwrite rollback |
-| `delta` | Bounded rolling block matching and transfer statistics |
-| `sync` | Incremental file reconstruction, previews, and per-file publication |
-| `reconcile` | Two-way inventories, baseline history, and conflict decisions |
-| `tui` | Guided action, folder, computer, review, preview, and result screens |
-
-The receive state machine has four states: between entries, receiving a file,
-verified, and failed. An invalid frame poisons it; only a verified machine can
-produce the value that publishes the storage transaction. Staging owns incoming
-files until publication, and drop order closes active files before deleting
-staging, including on Windows. Tests can drive the state machine directly
-without a socket. Network integration tests live in `src/transfer/tests.rs`.
-
-The CLI and TUI call the same `transfer` APIs. Network and filesystem behavior
-must not be reimplemented in a presentation layer.
+# Development
 
 ## Toolchain
 
-`rust-toolchain.toml` tracks the current stable Rust toolchain. The crate metadata
-records Rust 1.88 as the minimum accepted by the current dependency set.
-Dependencies are locked in `Cargo.lock`, including for release builds.
+Use Zig **0.17.0**. The migration began with the installed `zig init` command;
+its package fingerprint is retained. There are no fetched application
+packages, C bindings, Rust components, or external networking/crypto libraries.
+Use the [language reference](https://ziglang.org/documentation/0.17.0/) and the
+standard-library source shipped with that exact compiler version.
 
-Run the full local gate:
-
-```console
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
-cargo build --release --locked
-cargo audit
+```sh
+zig fmt --check build.zig src
+zig build test
+zig build -Doptimize=ReleaseSafe
+python3 tests/integration.py zig-out/bin/xfer
+python3 tests/desktop.py zig-out/bin/xfer
 ```
 
-Install the audit command with `cargo install cargo-audit --locked`.
+If a sandbox disallows the default compiler cache, point
+`ZIG_GLOBAL_CACHE_DIR` at a writable directory. Network integration requires
+permission to bind local TCP/UDP ports and uses isolated temporary directories.
 
-Loopback tests need permission to bind local sockets. Sandboxed environments may
-need to grant that capability.
+## Architecture
 
-## Test strategy
+| Module | Responsibility |
+| --- | --- |
+| `main.zig` | Process entry, errors and exit status |
+| `cli.zig` | Strict arguments, launch routing, terminal menu, listener lifecycle |
+| `desktop.zig` | Loopback capability API, selection staging, jobs and browser consent |
+| `ui/` | Embedded browser interface, no bundler or runtime packages |
+| `reporter.zig` | JSON/human events and bounded terminal input |
+| `discovery.zig` | Nonce-bound UDP queries and source-address replies |
+| `manifest.zig` | Snapshot planning, streaming hashes, inventory validation |
+| `paths.zig` | Portable names and handle-relative no-follow traversal |
+| `net_io.zig` | Cancellable Windows network deadlines; native batching elsewhere |
+| `wire.zig` | Committed handshake, key derivation, encrypted records |
+| `transfer.zig` | Consent, streaming, staging and publication |
+| `root.zig` | Reusable library surface and test discovery |
 
-Unit tests cover:
+All I/O receives an explicit `std.Io` instance. Application entry uses
+`std.process.Init`; tests use `std.testing.io`. The long-running receiver
+allocates a fresh arena for each session and releases it after success or
+failure. Discovery is a cancellable `Io.Group` task whose socket stays alive
+until the task finishes. File content memory is bounded independently of item
+size; metadata has finite caps and is released with the session arena.
 
-- stable identity and peer-store persistence;
-- key agreement, record encryption, token separation, and tamper detection;
-- protocol record bounds, flags, sequence ordering, and negotiation rejection;
-- discovery validation, version filtering, address selection, and name limits;
-- exclusions, path traversal, portability, symlink escape, and collision naming;
-- TUI navigation, consecutive Send/Receive list items, input editing, and constrained layouts;
-- rolling block reuse after insertions/deletions and literal boundaries;
-- clap command validity and value bounds.
+Preparation opens the user-selected root's canonical parent, skips symlinks,
+walks ordinary files/directories and hashes each file. The offer is sorted in
+byte order and checked again by the receiver. Every non-root entry has an
+already declared directory parent. File access opens each path component
+separately without following links. A source that changes while streaming
+cannot match the preapproved digest and is never published.
 
-End-to-end tests bind an ephemeral loopback port and cover:
+Files smaller than 1 MiB retain synchronous streaming with a 64 KiB buffer.
+Larger files use two 1 MiB buffers per endpoint: the sender overlaps the next
+read/hash with encryption/transmission, and the receiver overlaps the previous
+hash/write with reception/decryption. Only one task touches a file hash at a
+time. Futures are canceled and joined before their borrowed buffers, hash state
+or file handles expire; `Io.async` can execute synchronously when concurrency
+is unavailable. All hashes, consent checks, syncs and publication rules remain.
+The 64 KiB wire limit is unchanged, so previous Zig peers still interoperate.
+Record encryption and decryption use exact-overlap channel buffers. The
+standard-library crypto aliasing behavior is covered by boundary tests and the
+buffers are wiped on channel teardown. Planning reuses its already validated
+parent directory handle while retaining no-follow and opened-file kind checks.
+See [performance measurements](../benchmarks/PERFORMANCE.md).
 
-- plaintext compatibility transfer;
-- secure transfer with a shared token;
-- zero-byte files and collision-safe destinations;
-- directory trees and empty directories;
-- wrong-token failure before TOFU persistence;
-- changed pinned-identity rejection and manual approval with concurrent store updates;
-- cancellation of waiting listeners and blocked reads;
-- malformed totals, path aliases, corrupt data, and interrupted staging cleanup;
-- a complete transfer between two compiled CLI processes;
-- unchanged sync, shifted block reuse, read-only previews, and two-way conflicts.
+The connection API in Zig 0.17's `Io.Threaded` backend panics when
+`ConnectOptions.timeout` is set. `transfer.connect` instead races a normal
+cancellable connection against a 10-second `Io.Select` timer. It cancels the
+loser and closes any stream returned by a losing connection. Windows also rejects network operations in `Io.Batch.awaitConcurrent` (used by
+`Io.operateTimeout`). `net_io.zig` races a normal cancellable network operation
+against its absolute deadline on Windows and joins canceled tasks before their
+buffers expire. macOS/Linux retain the native `Io.operateTimeout` path. UDP
+discovery uses the same adapter. These paths are covered by native network CI.
 
-CLI integration tests verify human and JSON output, diagnostics, peer
-management, completion generation, validation failures, and a real subprocess
-transfer. Installer tests build local release fixtures, exercise platform
-selection and checksum verification, and prove that failed upgrades preserve an
-existing installation. CI runs the POSIX installer tests on Linux and macOS and
-the PowerShell tests on Windows.
+The browser control listener uses a random loopback port and a 256-bit launch
+capability carried initially in the URL fragment, then in same-origin
+sessionStorage. API requests send the capability as a bearer header. Exact
+Host and Origin checks prevent DNS rebinding and cross-origin control; no CORS
+access is enabled. Embedded static assets need no capability. A restrictive
+CSP allows only same-origin scripts/styles and rejects framing.
 
-When changing the wire format, add a focused protocol test and update
-`docs/PROTOCOL.md`.
+Browser-selected files stream to a private temporary tree. The UI never sends
+an arbitrary source path to the server. One outgoing or incoming job runs at a
+time; the HTTP API remains responsive while transfer/approval/upload I/O waits.
+Application state is protected by `Io.Mutex`, and no response writes hold that
+mutex. `Io.Group` owns cancellable listener, discovery, HTTP, and transfer jobs.
+Shutdown cancels jobs before closing their sockets or freeing state. Explicit task cancellation wakes stalled reads on every platform; Windows
+socket shutdown alone does not reliably interrupt pending reads. Cleanup runs
+with cancellation blocked, removing selected-file storage and receive staging. Discovery
+uses a fresh instance identifier so a window does not offer itself as a peer.
 
-## Error handling
+## Verification
 
-Library functions return `XferError`; the binary converts errors at its outer
-boundary. Protocol errors should identify the violated invariant. Sensitive
-values such as tokens and private keys must never appear in errors or logs.
+Unit tests exercise portable-path checks, manifest invariants, AEAD tamper and
+sequence binding, discovery correlation, CLI validation, and collision names.
+Integration tests use two real XFER processes and TCP proxies to check:
 
-The receiver sends a best-effort encrypted error frame after a session exists.
-Partially received content remains in the staging directory and is removed by
-the temporary-directory guard.
+- Encrypted file/folder transfers, Unicode, empty entries and skipped symlinks.
+- Final acknowledgement and preserving an existing destination.
+- Tampered ciphertext, dropped connections, wrong secrets and size limits.
+- No published item or abandoned staging after ordinary session failures.
+- UDP discovery and persistent-listener recovery.
+- Offline preparation and rejecting automatic approval without a secret.
+- Real pseudo-terminal code comparison, rejection and changing-source checks.
+- Browser API upload/send/receive, UTF-8 and empty directories, approval and rejection.
+- Browser capability/Host/Origin enforcement, traversal/size rejection and stalled-upload cancellation.
 
-## Adding protocol features
+CI executes native tests on all three operating systems and cross-builds both
+x86-64 and ARM64 for each. Cross-compilation alone does not validate operating
+system behavior. The migration includes a real Linux ARM64 to macOS ARM64 Wi-Fi benchmark
+with independent hash verification; see [the report](../benchmarks/README.md).
+Native CI also verifies Windows CLI transfers and the browser control API.
+Platform firewall prompts, default-browser launch behavior on Windows/Linux,
+and unusual destination filesystems still need manual checks on those hosts.
+Browser appearance and actual file-picker/code-confirmation controls were
+checked locally on macOS.
 
-Prefer a new typed frame or a versioned structured field. Keep these invariants:
+## Release
 
-- one monotonically ordered stream;
-- bounded record allocation;
-- authenticated headers and sequence numbers;
-- no final-path visibility before verification;
-- no path interpretation before validation;
-- no automatic trust after an identity change.
+`VERSION` supplies the executable version through generated build options.
+Keep the package's semantic `.version` in `build.zig.zon` in sync.
 
-A breaking wire change increments `protocol::VERSION` and the record version.
+```sh
+python3 scripts/package.py
+```
 
-## Shared distribution infrastructure
+This builds six `ReleaseSafe` binaries and writes archives and SHA-256 sidecars
+to `dist/`. Linux uses musl. Archives include the executable, README, security
+notes and VERSION. Windows archives are ZIP; macOS/Linux archives are tar.gz.
+The script requires only Python's standard library and Zig.
 
-XFER consumes `cdenihan/rust-cli-toolkit` at an immutable tag for its self-update
-runtime, installer generation, cross-platform CI, and release jobs. The local
-workflow files are intentionally thin callers; XFER-specific commands and
-transfer behavior remain in this repository.
-
-The toolkit is public, so normal Cargo, GitHub Actions, and Dependabot access
-does not require credentials. The workflow callers still pass the optional
-`RUST_CLI_TOOLKIT_TOKEN` Actions secret as `dependency_token`. A private fork,
-or a consumer with private Git dependencies, can provide a fine-grained token
-with read-only Contents access under that name. Public consumers can leave the
-secret unset. If Dependabot also needs private Git access, configure the same
-name as a Dependabot secret and add a matching `git` registry entry to
-`.github/dependabot.yml`.
-
-The toolkit dependency and reusable workflow references must move together.
-Dependabot monitors Cargo and GitHub Actions separately, so review both update
-pull requests as one toolkit release before merging.
-
-## CI and releases
-
-Pull requests run format, Clippy, tests on all three desktop operating systems,
-and cross-target `cargo check` using current stable Rust. Branch pushes do not
-duplicate those runs; pushes to `main` validate the merged result. Superseded
-runs for the same pull request or ref are cancelled.
-
-Every push to `main` creates a release. The workflow generates a UTC version in
-the form `YYYY.MM.DD.<daily-release-number>` and a matching
-`vYYYY.MM.DD.<daily-release-number>` Git tag. It inspects the existing tags for
-that UTC date and increments the highest suffix, so releases made on the same
-day are numbered `.1`, `.2`, `.3`, and so on. The workflow reserves the tag
-atomically before building to avoid duplicate numbers from concurrent pushes,
-and removes its unused reservation if the release fails.
-
-The shared prepare workflow updates three version sources and creates a
-`github-actions[bot]` commit on `main` before building:
-
-- `VERSION` keeps the exact public form, such as `2026.07.16.7`;
-- `Cargo.toml` uses the SemVer-compatible equivalent `2026.7.16-7`;
-- `Cargo.lock` records the same Cargo package version.
-
-Cargo requires exactly three non-zero-padded numeric core components, so the
-public date form cannot be used literally in the package `version` field. The
-CLI reads `VERSION` through `build.rs`, preserving the exact public form for
-`xfer --version`, `xfer doctor`, transfer version checks, tags, and release
-titles. The push-triggered workflow stops after creating the bot commit and
-reserved tag. It then dispatches a separate `Release` workflow at that tag, so
-the build run itself, every platform checkout, and the GitHub release are all
-attached to the bot-authored commit rather than the triggering user commit.
-Pushes made with the workflow's `GITHUB_TOKEN` do not recursively start the
-push-triggered workflow.
-
-Each release builds raw binaries and SHA-256 files for:
-
-- Linux x86_64 and ARM64, GNU and musl;
-- macOS x86_64 and Apple Silicon;
-- Windows x86_64 and ARM64.
-
-Release builds use `--locked`. The shared publish workflow renders XFER-branded
-`install.sh` and `install.ps1`, publishes checksums for both scripts, and adds a
-`VERSION` asset used to make already-current update checks a no-op.
+Pushing a tag `v<VERSION>` starts native tests and cross-builds before publishing
+release archives. Release jobs reject a tag that disagrees with VERSION.
+The rewritten release flow uses no private Rust toolkit or dependency token.

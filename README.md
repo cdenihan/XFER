@@ -1,393 +1,193 @@
 # XFER
 
-XFER is a secure, direct file-transfer tool for Windows, macOS, and Linux. It
-sends a file or directory over a single TCP connection, with no account, cloud
-service, or server deployment.
+Nearby file sharing for Windows, macOS, and Linux, written in **Zig 0.17.0**.
+Open XFER on two computers, choose a nearby receiver, compare the code, and send
+a file or folder. No accounts, cloud, server deployment, or runtime packages.
 
-The CLI is a Rust application with
-[clap](https://github.com/clap-rs/clap) CLI and
-[Ratatui](https://github.com/ratatui/ratatui) terminal interface.
+XFER uses the same local network (Wi-Fi or Ethernet). Launching it opens a
+browser sharing window; the same executable also provides a scriptable CLI. It does not speak Apple's AirDrop
+protocol or establish Bluetooth/AWDL/Wi-Fi Direct connections.
 
-## Highlights
+## Build
 
-- Secure by default: X25519 key agreement, HKDF-SHA-256, and
-  ChaCha20-Poly1305 authenticated encryption
-- Trust on first use (TOFU) with a human-verifiable 10-digit security code
-- Streaming file and directory transfer with bounded memory use
-- Per-file SHA-256 and aggregate manifest verification
-- Atomic receive staging: unverified data never appears at the final path
-- IPv4 and IPv6 support over one configurable port
-- Passive same-LAN receiver discovery with no subnet or port scanning
-- Collision-safe destination naming and explicit `--overwrite`
-- Exclusion globs, safe symlink handling, and copy/sync previews
-- One-way and two-way incremental folder sync with explicit conflict handling
-- Optional shared token mixed into key derivation
-- Human progress, newline-delimited JSON events, and a live TUI
-- Peer-management, diagnostics, and shell-completion commands
-- A checksum-verified `xfer update` command that replaces the active installation
-- No-op update checks when the installed release is already current
-- Native CI on Linux, macOS, and Windows plus cross-target checks
+Install [Zig 0.17.0](https://ziglang.org/download/) and run:
 
-## Install
-
-Linux or macOS:
-
-```console
-curl -fsSL https://github.com/cdenihan/XFER/releases/latest/download/install.sh | sh
+```sh
+zig build -Doptimize=ReleaseSafe
 ```
 
-Windows PowerShell:
+The executable is `zig-out/bin/xfer` (`xfer.exe` on Windows). The application
+uses only Zig's standard library. Language and I/O APIs follow the
+[0.17.0 documentation](https://ziglang.org/documentation/0.17.0/).
 
-```powershell
-irm https://github.com/cdenihan/XFER/releases/latest/download/install.ps1 | iex
+## Share
+
+Launch `xfer` (or double-click `xfer.exe` on Windows) on both computers.
+Your default browser opens a local sharing window and XFER is ready to receive.
+
+1. Drag files or a folder into the window, or use **Choose files / Choose folder**.
+2. Select a nearby computer and click **Share files**.
+3. Compare the full code on both windows, check that it matches, and approve.
+
+Received items appear in Downloads/XFER. Progress, cancellation, incoming
+requests, and the next transfer use the same window. Multiple selected files
+arrive together in a `Shared items` folder. Dropped folders preserve empty
+subdirectories; folder pickers may omit empty subdirectories depending on the
+browser. A modern browser is the only UI requirement; everything is embedded
+in the Zig executable. Closing its tab leaves XFER receiving until you use
+**Quit XFER** or stop the process.
+
+If discovery is filtered, expand **Connect using an address** and enter the
+other computer's IP/hostname (optionally with a port). Configure the window:
+
+```sh
+xfer --name "Office PC" --output ./Received
+xfer --no-open                 # Print its local URL for manual opening
 ```
 
-The installers detect the operating system and CPU architecture, default to
-musl on Linux to avoid host glibc compatibility issues, download the matching
-release binary, verify its SHA-256 file, and replace an existing installation
-atomically. GNU Linux builds remain available through `--libc gnu`. See
-[docs/INSTALLATION.md](docs/INSTALLATION.md) for version pinning, install
-locations, PATH behavior, mirrors, and manual installation.
+The browser sends selected files to private local temporary storage before the
+LAN transfer. This requires temporary disk space equal to the selection size,
+and adds a local copy; temporary files are removed after sending or canceling.
+The browser never grants XFER arbitrary read access to local paths. Use the
+CLI to stream a selected source directly without this temporary copy:
 
-After the first install, update that same executable in place:
-
-```console
-xfer update
+```sh
+# Receiving computer
+xfer receive
+# Sending computer
+xfer send ./photos
 ```
 
-## Quick start
+Compare the entire displayed code (for example `81b2-08fa-c903`) through a
+trusted channel and approve on both computers. Run `xfer menu` for the terminal
+menu. File contents are sent only after both approvals. Receivers remain
+available for the next transfer until you quit.
 
-Install the same XFER version on both machines.
+Default destination: `~/Downloads/XFER` (`%USERPROFILE%\Downloads\XFER` on
+Windows). Choose another directory with `--output`:
 
-On the receiving machine:
-
-```console
-xfer receive --output ~/Downloads
+```sh
+xfer receive --output ./Received --name "Office PC"
+xfer send ./report.pdf --to 192.168.1.42
 ```
 
-On the sending machine, open the TUI and choose the discovered receiver:
+Allow XFER through the private-network firewall on the receiving computer.
+Both TCP and UDP use port **9000** by default. Guest Wi-Fi, client isolation,
+VPNs, or broadcast filtering can prevent discovery; use `--to HOST` when the
+computers are otherwise reachable. Nearby discovery sends one small IPv4
+broadcast query and receivers reply directly. It never scans a subnet.
 
-```console
-xfer tui
-```
+## Delivery guarantees
 
-Or send directly to an address:
+- X25519 ephemeral key exchange, HKDF-SHA-256, and ChaCha20-Poly1305 records.
+- Key commitments before disclosure prevent choosing keys after seeing a peer's
+  handshake to manipulate the comparison code.
+- Explicit approval on both devices, or a strong shared secret for automation.
+- Streaming file data in 64 KiB chunks; finite metadata and transfer-size limits.
+- SHA-256 verification of every file and of the exact offered manifest.
+- The entire item stays in a private staging directory until verified.
+- Atomic publication preserves existing items: `photos`, then `photos (1)`, etc.
+- A sender reports success only after the receiver acknowledges publication.
+- UTF-8 filenames, nested and empty directories, and zero-byte files work.
+- Symlinks and special files are skipped. Paths are checked on both computers.
 
-```console
-xfer send 192.168.1.42 ./photos
-```
-
-The first secure connection displays the same security code on both machines.
-Compare the codes before approving the receiver on the sending machine. The
-receiver identity is remembered for future transfers. An identity change always
-requires manual confirmation.
-
-Receivers advertise only while `xfer receive` is waiting. Discovery uses one
-small, link-local multicast announcement rather than probing machines or ports.
-If multicast is unavailable, use the receiver address shown in the TUI or by
-`xfer ip`.
-
-## Terminal interface
-
-Launch the Ratatui interface with:
-
-```console
-xfer tui
-```
-
-Running `xfer` without arguments also opens the interface in a terminal.
-Send and Receive are consecutive items in a vertical list, followed by one-way
-and two-way sync.
-Choose an action, browse to a folder, select a nearby computer (or enter its
-address), and review the operation. Sync always shows a preview before applying.
-
-Use arrows and Enter to navigate, `p` to enter a folder path, and `m` to enter
-an address. Receive mode shows the addresses other computers can use and keeps
-listening after a session. Enable sync access on its review screen to permit
-updates and two-way reads directly in the selected folder (without appending
-the sender’s folder name). After reviewing the preview, press Enter on the
-sending computer to apply; the receiver keeps waiting until you do. Copies
-still save the incoming item inside the selected folder. During a conflict preview, `l` prefers local files,
-`r` prefers remote files, and `s` preserves both versions; each choice refreshes
-the preview before applying. On the sync review screen, `g` toggles Git ignore
-filtering; the choice is remembered when repeating the last workflow. Esc cancels waiting or active work. Completed and
-failed operations can be retried, and the last workflow is remembered without
-saving its shared token. Cancellation during source planning or name resolution
-waits for that operation to return.
+The source is hashed during preparation and again while streaming. Changes to
+its contents or size abort delivery. Keep the source stable during a transfer.
 
 ## CLI
 
-### Send
-
-```console
-xfer send <HOST> <PATH>
+```sh
+xfer [--name NAME] [--output DIR] [--bind ADDRESS] [--no-open]
+xfer menu
+xfer send PATH [--to HOST] [--port PORT] [--dry-run]
+xfer receive [--output DIR] [--name NAME] [--bind ADDRESS]
+             [--port PORT] [--once] [--no-discovery] [--max-bytes BYTES]
+xfer discover [--port PORT]
+xfer doctor [--port PORT]
+xfer --help
+xfer --version
 ```
 
-Common options:
+`--dry-run` hashes and checks a local item without connecting. `--once` exits
+after one incoming session, with a nonzero exit code on rejection or failure.
+The default receiver limit is **16 GiB** per item; use `--max-bytes` to change it.
+A folder is one item. Send several items as a containing folder or in separate
+transfers.
 
-```console
-# Different port
-xfer send 192.168.1.42 ./payload --port 9100
+The default listener is IPv4. Direct IPv6 works with an explicit listener:
 
-# Exclude directory content
-xfer send 192.168.1.42 ./project \
-  --exclude '.git' \
-  --exclude 'target/**'
-
-# Send the current directory
-xfer send 192.168.1.42 .
-
-# Inspect the plan without connecting
-xfer send example.invalid ./project --dry-run
-
-# Non-interactively trust a previously unseen identity
-xfer send 192.168.1.42 ./payload --accept-new
-
-# Add a shared secret without exposing it in shell history
-XFER_TOKEN='correct horse battery staple' \
-  xfer send 192.168.1.42 ./payload
+```sh
+xfer receive --bind :: --no-discovery
+xfer send ./photo.jpg --to '[fe80::1234%en0]:9000'
 ```
 
-Symlinks are skipped by default. `--follow-links` follows only links whose
-resolved targets remain inside the transfer root.
+Use your local interface name/index for scoped link-local addresses. IPv6-only
+listeners do not advertise through IPv4 discovery. The receiver's bind address
+restricts both its TCP listener and its discovery socket.
 
-XFER requires portable filenames, including when both computers run macOS or
-Linux. A name such as `node:child_process` contains `:`, which Windows cannot
-represent. The error identifies the source path. Rename the entry or exclude
-its containing dependency directory, for example:
+## Automation
 
-```console
-xfer send 192.168.1.42 ./project --exclude 'node_modules'
+Set the **same strong random secret** on both computers via `XFER_TOKEN`, then
+use `--yes`. Minimum 16 bytes; a randomly generated 32-byte value encoded as hex
+is recommended. A password's length alone does not make it strong. Secrets are
+never saved in configuration or included in events.
+
+```sh
+# Set XFER_TOKEN privately in the environment on both computers.
+xfer --json receive --yes --once --output ./Received
+xfer --json send ./artifact --to 192.168.1.42 --yes
 ```
 
-If every original filename must be preserved, create a tar archive and send that
-file, then extract it on a filesystem that supports those names. Exclusions are
-also available in the TUI review screen. The progress view shows both completed
-files and transferred bytes: the file count stays unchanged during a large file,
-and the sender can pause while the receiver drains buffered data. Press `d` for
-current throughput (a rolling two-second rate), average throughput, byte totals,
-and measured elapsed time alongside the logs. Rates measure reported payload
-bytes from the first progress sample, exclude preparation/connection time and
-protocol overhead, and reset for each transfer or phase. Stalls reduce the
-current rate to zero; completed statistics remain available in Details.
+PowerShell environment syntax is `$env:XFER_TOKEN = '<your secret>'`.
+`--json` emits newline-delimited JSON events on stdout. Diagnostics and prompts
+use stderr. JSON CLI transfers require `--yes`; there is no implicit trust flag or
+unencrypted mode. Exit status is 0 on success and 1 on failure.
 
-### Receive
+## Tests
 
-```console
-xfer receive --output ./downloads
+```sh
+zig fmt --check build.zig src
+zig build test
+zig build -Doptimize=ReleaseSafe
+python3 tests/integration.py zig-out/bin/xfer
+python3 tests/desktop.py zig-out/bin/xfer
 ```
 
-The receiver accepts one transfer, verifies it, writes it to the destination,
-and exits. If the destination name already exists, XFER chooses a numbered name
-such as `photo (1).jpg`. Use `--overwrite` to replace the exact destination.
-The receiver is discoverable on the local network by default. Use
-`--no-discovery` when you want to require manual address entry.
+On Windows use `python tests/integration.py zig-out/bin/xfer.exe`.
+Python 3 is used only for process/network integration tests and release
+packaging. CI runs the suite natively on Windows, macOS, and Linux, and builds
+x86-64 and ARM64 for each platform. See [development](docs/DEVELOPMENT.md),
+[installation](docs/INSTALLATION.md), and the [wire protocol](docs/PROTOCOL.md).
 
-To bind a specific interface:
+For the large-file pipeline and measured results, see
+[performance](benchmarks/PERFORMANCE.md).
 
-```console
-xfer receive --bind 0.0.0.0 --port 9100
-```
+## Boundaries
 
-The default bind address is `::`, configured as a dual-stack socket where the
-operating system supports it.
+This is a deliberate breaking redesign around nearby sharing. The old Rust
+protocol, folder synchronization, TOFU peer database, self-updater, and terminal
+framework are replaced by the Zig implementation. Old peers cannot connect.
 
+The window is browser-based. There is no tray, OS sharing extension, background
+launch service, or wireless link setup. The control server binds only to loopback
+on a random port. Its APIs require a random launch capability and validate
+Host/Origin; the LAN listener exposes only the encrypted transfer protocol.
+File permissions, ownership, ACLs, timestamps, extended attributes, resource
+forks, and executable bits are not copied. On Unix received files are private
+(0600; directories 0700). On Windows they inherit destination ACLs.
 
-### Sync folders between machines
+Names must be representable on all three operating systems. Traversal, Windows
+reserved names, control characters, trailing dots/spaces, and ASCII case aliases
+are rejected. Unicode case/normalization aliases that the destination cannot
+represent abort safely during exclusive creation. Names are limited to 255
+UTF-8 bytes, paths to 4096 bytes and 64 components; destination filesystem limits
+may be lower. Metadata is limited to 16 MiB and inventories to 100,000 entries.
 
-On the other machine, choose the parent directory that will hold synced folders:
+Network failures remove staging. Force-quitting or power loss can leave a
+hidden `.xfer-*.part` directory; it can be removed after stopping the receiver.
+Interrupted items restart. If the final acknowledgement is lost, the item may
+already be delivered; check the destination before retrying. Publication is
+atomic visibility, not a guarantee against every filesystem/power-loss scenario.
 
-```console
-xfer receive --sync --output ~/Sync
-```
-
-Then preview and apply from your machine:
-
-```console
-xfer sync 192.168.1.42 ./photos --two-way --dry-run
-xfer sync 192.168.1.42 ./photos --two-way
-```
-
-This pairs `./photos` with `~/Sync/photos`. Omit `--two-way` to update only the
-remote folder. Unchanged files are left untouched. Changed files reuse matching
-blocks already at the destination, including blocks shifted by insertions;
-only unmatched data travels across the connection. Comparisons read file
-contents rather than relying on modification times. Reported transferred bytes
-exclude encryption, metadata, and block-signature overhead.
-
-To sync into an existing checkout itself, select that folder in the interactive
-receiver, or use `--sync-into` on the command line:
-
-```console
-xfer receive --sync --sync-into --output ~/Developer/PlatinumBankingSystem
-```
-
-This updates files directly in `PlatinumBankingSystem`, even if the sending
-folder has a different name. Without `--sync-into`, the CLI keeps the parent
-folder behavior shown above.
-
-Use `--gitignore` to sync tracked files plus untracked files that Git does not
-ignore:
-
-```console
-xfer sync 192.168.1.42 ./PlatinumBankingSystem --gitignore --dry-run
-xfer sync 192.168.1.42 ./PlatinumBankingSystem --gitignore
-```
-
-This opt-in setting follows nested `.gitignore` rules, negations, and Git's
-repository/global excludes. Tracked files remain included even if an ignore
-pattern matches them; explicit `--exclude` patterns still take precedence.
-Git metadata (`.git`) and empty directories are omitted in a repository.
-Git must be installed. Outside a repository, the setting has no effect.
-Subdirectories of repositories and worktrees are supported.
-
-For `--two-way --gitignore`, each side filters its outgoing files using its own
-repository rules. Incoming candidates are also checked against the initiating
-repository's rules, so locally ignored files are not brought back. Both XFER
-builds must support this option for two-way sync. Ignored files already at the
-destination remain untouched; this option never deletes them.
-
-Two-way sync remembers the last successful common file hashes on the initiating
-machine. Changes made on just one side flow to the other. If both sides changed,
-or the first sync finds different versions of the same file, both versions stay
-in place and the command reports conflicts with a nonzero exit status. Resolve
-those files yourself or preview an explicit choice:
-
-```console
-xfer sync 192.168.1.42 ./photos --two-way --conflicts prefer-local --dry-run
-xfer sync 192.168.1.42 ./photos --two-way --conflicts prefer-local
-```
-
-`prefer-remote` chooses the other machine's conflicting files. These choices
-apply to all file conflicts; file-versus-directory conflicts remain unresolved.
-Run subsequent syncs from the same machine, using the same endpoint and folders,
-to retain comparison history. Starting from the other machine or losing the
-configuration uses conservative first-sync behavior.
-
-Neither mode propagates deletions: files present on only one side are retained
-(and copied back in two-way mode). Exclusions apply to both sides. Two-way sync
-does not follow symlinks. Preview connects and compares but does not modify the
-synced folders or sync history. Each changed file is verified before publication;
-a canceled sync retains completed files and can be rerun to reuse them. Sync
-receivers keep listening; add `--once` for a single session.
-
-Both machines need this protocol-v5 build; older protocol versions are rejected.
-
-### Update
-
-```console
-xfer update
-xfer update --version 2026.07.16.2
-```
-
-The updater reads the latest release's small `VERSION` marker first. If the
-installed release is current it exits without replacing the executable;
-otherwise it verifies the installer and uses it to replace the currently
-running XFER installation.
-On Windows, replacement finishes immediately after the current process exits.
-Installations in protected system directories may require reinstalling to a
-user-writable directory first.
-
-XFER also exchanges release versions during a transfer. If the versions differ,
-the older interactive CLI warns and offers to update to the peer's exact release.
-Non-interactive and JSON sessions report the mismatch without prompting.
-
-
-### Automation
-
-`--json` emits newline-delimited JSON status, progress, SAS, and completion
-events:
-
-```console
-xfer --json send 192.168.1.42 ./artifact --accept-new
-```
-
-Secure automation must either use an already remembered peer or opt into
-`--accept-new`. A changed identity is never accepted automatically.
-
-### Utilities
-
-```console
-xfer ip
-xfer discover
-xfer doctor
-xfer peers list
-xfer peers forget 192.168.1.42:9000
-xfer peers clear --yes
-xfer completions zsh
-```
-
-Global configuration options:
-
-- `--config-dir <PATH>` or `XFER_CONFIG_DIR`: override `~/.xfer`
-- `--json`: emit machine-readable events
-
-Set `XFER_NAME` on a receiver to override the machine label shown during LAN
-discovery.
-
-### Insecure mode
-
-`--insecure` (alias `--no-secure`) disables encryption and peer authentication.
-It must be set on both sender and receiver.
-
-```console
-xfer receive --insecure
-xfer send 192.168.1.42 ./payload --insecure
-```
-
-SHA-256 integrity checks still run, but they do not protect against an active
-attacker because the hashes travel over the same unauthenticated connection.
-Use insecure mode only for controlled compatibility or debugging.
-
-## Security model
-
-The receiver stores a persistent X25519 identity in
-`~/.xfer/identity.key`. The sender pins the receiver public-key fingerprint in
-`~/.xfer/known_peers.json`.
-
-Each connection uses:
-
-1. protocol and security-mode negotiation;
-2. the receiver static public key and fresh random nonce;
-3. a sender ephemeral X25519 key and fresh random nonce;
-4. HKDF-SHA-256 directional keys and nonce prefixes;
-5. an encrypted readiness exchange before a new identity can be persisted;
-6. sequence-numbered ChaCha20-Poly1305 records;
-7. per-file and aggregate SHA-256 verification.
-
-The security code authenticates the first connection when users compare it on
-both machines. See [SECURITY.md](SECURITY.md) for the threat model and
-[docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format.
-
-## Build and test
-
-The repository tracks the current stable Rust toolchain. The crate metadata
-records Rust 1.88 as the minimum version accepted by the latest dependency set.
-
-```console
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
-cargo build --release --locked
-cargo audit
-```
-
-The resulting executable is `target/release/xfer` (or `xfer.exe` on Windows).
-Install the optional audit command with `cargo install cargo-audit --locked`.
-
-For contributor architecture, test strategy, and release details, see
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-## Current limitations
-
-- Ordinary CLI receive accepts one transfer; `receive --sync` keeps listening.
-- Interrupted files restart; sync reuses existing published files and blocks.
-- Two-way inventories are limited to 100,000 entries. Changed files above 256 GiB
-  fall back to sending their contents without block reuse.
-- File metadata such as ownership, ACLs, and extended attributes is not copied.
-- Entry names must be valid UTF-8 and portable across Windows, macOS, and Linux;
-  case-only collisions and Windows-reserved names are rejected.
-- Automatic discovery currently uses IPv4 multicast; direct transfers continue
-  to support both IPv4 and IPv6.
-
-These constraints keep the protocol small, deterministic, and auditable.
+See [SECURITY.md](SECURITY.md) for trust assumptions and reporting.
+The measured Rust/Zig LAN comparison is in [benchmarks](benchmarks/README.md).
