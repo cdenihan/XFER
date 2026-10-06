@@ -111,6 +111,23 @@ def run():
             sender.request('/api/new', {'name': 'valid', 'folder': True})
             sender.request('/api/upload', b'bad', method='PUT', headers={'X-Xfer-Path': 'valid%2F%2E%2E%2Fescape'}, status=400)
             sender.request('/api/upload', b'bad', method='PUT', headers={'X-Xfer-Path': 'other/file'}, status=400)
+            # Separate headers/body to force rejection before the body arrives.
+            # Closing immediately with those bytes in flight can discard the
+            # error response on Windows; do not retry or accept a socket reset.
+            for _ in range(20):
+                rejected = socket.create_connection((sender.host, sender.http_port), timeout=5)
+                try:
+                    header = f'PUT /api/upload HTTP/1.1\r\nHost: {sender.host}:{sender.http_port}\r\nAuthorization: Bearer {sender.token}\r\nX-Xfer-Path: other/file\r\nContent-Length: 3\r\n\r\n'
+                    rejected.sendall(header.encode())
+                    time.sleep(.02)
+                    rejected.sendall(b'bad')
+                    response = http.client.HTTPResponse(rejected)
+                    response.begin()
+                    assert response.status == 400
+                    assert json.loads(response.read())['error'] == 'InvalidUpload'
+                    response.close()
+                finally:
+                    rejected.close()
             sender.request('/api/cancel', {})
             assert not sender.state()['busy']
             assert not list(sender.root.glob('xfer-upload-*'))

@@ -7,6 +7,7 @@ const manifest = @import("manifest.zig");
 const transfer = @import("transfer.zig");
 const discovery = @import("discovery.zig");
 const wire = @import("wire.zig");
+const net_io = @import("net_io.zig");
 const Reporter = @import("reporter.zig").Reporter;
 pub const Settings = struct { port: u16 = 9000, bind: []const u8 = "0.0.0.0", output: []const u8, name: []const u8, max_bytes: u64 = 16 * 1024 * 1024 * 1024, open_browser: bool = true, json: bool = false };
 const Peer = struct { name: []const u8, address: []const u8 };
@@ -416,7 +417,32 @@ fn httpConnection(s: *State, stream: Io.net.Stream) void {
     defer select.cancelDiscard();
     select.concurrent(.done, httpInner, .{ s, stream, &control }) catch return;
     select.concurrent(.timeout, HttpControl.wait, .{ &control, s.io }) catch return;
-    _ = select.await() catch return;
+    const result = select.await() catch return;
+    select.cancelDiscard();
+    switch (result) {
+        .done => |completed| {
+            completed catch return;
+            finishHttpConnection(s.io, stream);
+        },
+        .timeout => {},
+    }
+}
+
+fn finishHttpConnection(io: Io, stream: Io.net.Stream) void {
+    // A rejected request may still have bytes in flight. Closing with unread
+    // bytes can reset the socket on Windows and discard the flushed response.
+    // Send FIN first, then give the client a bounded chance to finish sending.
+    stream.shutdown(io, .send) catch return;
+    const deadline = wire.timeout(1).toDeadline(io);
+    var buffer: [8192]u8 = undefined;
+    var remaining: usize = 64 * 1024;
+    while (remaining != 0) {
+        var data = [_][]u8{buffer[0..@min(remaining, buffer.len)]};
+        const result = net_io.operateTimeout(io, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline) catch return;
+        const read = result.net_read catch return;
+        if (read.data_len == 0) return;
+        remaining -= read.data_len;
+    }
 }
 const response_headers = [_]std.http.Header{
     .{ .name = "Content-Type", .value = "application/json; charset=utf-8" },
