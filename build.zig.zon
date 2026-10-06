@@ -1,6 +1,6 @@
 .{
     .name = .XFER,
-    .version = "2.0.0",
+    .version = "2.0.1",
     .fingerprint = 0x538182bbdbdfb064, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1 — Windows browser response fix
+
+- Preserve HTTP error responses when rejected upload bytes arrive during socket
+  teardown on Windows. Half-close the response side, then drain incoming bytes
+  with a fixed time and byte limit before closing the connection.
+- Add repeated delayed-body rejection coverage to the native browser integration
+  suite on Windows, macOS and Linux.
+
 ## 2.0.0 — Zig redesign
 
 - Initialized a new project with `zig init` using Zig 0.17.0.
