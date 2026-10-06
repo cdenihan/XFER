@@ -250,10 +250,43 @@ pub fn receive(a: std.mem.Allocator, io: Io, stream: Io.net.Stream, output: Io.D
     const final_name = try publish(a, io, stage, output, offer.name);
     defer a.free(final_name);
     // Once published, delivery is committed even if the acknowledgement is lost.
-    try options.reporter.event("received", final_name, received, offer.total);
+    try reportReceived(io, options.reporter, final_name, received, offer.total);
     // Publication commits the receive. A missing acknowledgement leaves only
     // the sender uncertain; never report this saved selection as failed.
     channel.send(.delivered, final_name) catch {};
+}
+
+fn reportReceived(io: Io, reporter: Reporter, name: []const u8, bytes: u64, total: u64) !void {
+    const previous = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(previous);
+    try reporter.event("received", name, bytes, total);
+}
+
+test "committed receive reporting blocks pending cancellation and restores protection" {
+    const Mock = struct {
+        protection: Io.CancelProtection = .unblocked,
+        reported: bool = false,
+        fn swap(context: ?*anyopaque, next: Io.CancelProtection) Io.CancelProtection {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const previous = self.protection;
+            self.protection = next;
+            return previous;
+        }
+        fn emit(context: *anyopaque, event: []const u8, _: []const u8, _: u64, _: u64) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.protection != .blocked) return error.Canceled;
+            try std.testing.expectEqualStrings("received", event);
+            self.reported = true;
+        }
+    };
+    var mock: Mock = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.swapCancelProtection = Mock.swap;
+    const io: Io = .{ .userdata = &mock, .vtable = &vtable };
+    const reporter: Reporter = .{ .io = io, .sink = .{ .context = &mock, .emit = Mock.emit } };
+    try reportReceived(io, reporter, "saved", 4, 4);
+    try std.testing.expect(mock.reported);
+    try std.testing.expectEqual(Io.CancelProtection.unblocked, mock.protection);
 }
 
 fn writeAndHash(file: Io.File, io: Io, chunk: []const u8, position: u64, hash: *manifest.Sha256) anyerror!void {

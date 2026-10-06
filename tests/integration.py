@@ -291,6 +291,36 @@ def main():
         assert (output / 'zero').read_bytes() == b''
         print('PASS nearby discovery and standalone empty-file transfer')
 
+        if sys.platform.startswith('linux'):
+            # Determine the primary local address without transmitting traffic.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(('192.0.2.1', 9))
+                selected = probe.getsockname()[0]
+            port = free_port()
+            r, events, t = receiver(root / 'restricted-discovery', port, discovery=True, bind=selected)
+            query = b'XFERQ002' + os.urandom(16)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.settimeout(1)
+                probe.sendto(query, ('127.0.0.1', port))
+                try:
+                    unexpected = probe.recv(256)
+                except socket.timeout:
+                    pass
+                else:
+                    raise AssertionError(('Discovery leaked onto loopback', unexpected))
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.bind((selected, 0))
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                probe.settimeout(2)
+                probe.sendto(query, ('255.255.255.255', port))
+                response, source = probe.recvfrom(256)
+                assert response[:24] == b'XFERR002' + query[8:]
+                assert source[0] == selected, source
+            r.terminate()
+            r.wait(timeout=10)
+            t.join(timeout=5)
+            print('PASS Linux discovery accepts selected-interface broadcasts and rejects another interface')
+
         try:
             with socket.socket(socket.AF_INET6) as v6:
                 v6.bind(('::1', 0))

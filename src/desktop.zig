@@ -36,6 +36,7 @@ const State = struct {
     mutex: Io.Mutex = .init,
     workers: Io.Group = .init,
     stop: Io.Event = .unset,
+    listener_failure: ?anyerror = null,
     decision_ready: Io.Event = .unset,
     decision: ?bool = null,
     pending: ?Pending = null,
@@ -167,6 +168,10 @@ pub fn run(init: std.process.Init, settings: Settings) !void {
         openBrowser(io, a, url) catch |err| try reporter.event("warning", @errorName(err), 0, 0);
     }
     try state.stop.wait(io);
+    state.mutex.lockUncancelable(io);
+    const listener_failure = state.listener_failure;
+    state.mutex.unlock(io);
+    if (listener_failure) |err| return err;
 }
 fn openBrowser(io: Io, a: std.mem.Allocator, url: []const u8) !void {
     const argv: []const []const u8 = switch (@import("builtin").os.tag) {
@@ -181,7 +186,10 @@ fn openBrowser(io: Io, a: std.mem.Allocator, url: []const u8) !void {
 }
 fn lanLoop(s: *State, server: *Io.net.Server) void {
     while (true) {
-        const stream = server.accept(s.io) catch return;
+        const stream = acceptRetry(s.io, server) catch |err| {
+            listenerStopped(s, "LAN", err);
+            return;
+        };
         s.mutex.lockUncancelable(s.io);
         if (s.busy) {
             s.mutex.unlock(s.io);
@@ -288,7 +296,10 @@ fn sendJobInner(s: *State, upload: *Upload, host: []const u8) !void {
 }
 fn httpLoop(s: *State, server: *Io.net.Server) void {
     while (true) {
-        const stream = server.accept(s.io) catch return;
+        const stream = acceptRetry(s.io, server) catch |err| {
+            listenerStopped(s, "Browser control", err);
+            return;
+        };
         if (s.connections.fetchAdd(1, .acq_rel) >= 16) {
             _ = s.connections.fetchSub(1, .acq_rel);
             stream.close(s.io);
@@ -299,6 +310,71 @@ fn httpLoop(s: *State, server: *Io.net.Server) void {
             stream.close(s.io);
         };
     }
+}
+
+fn acceptRetry(io: Io, server: *Io.net.Server) !Io.net.Stream {
+    while (true) {
+        return server.accept(io) catch |err| switch (err) {
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            error.SystemResources,
+            error.NetworkDown,
+            error.WouldBlock,
+            error.ConnectionAborted,
+            error.BlockedByFirewall,
+            => {
+                // Back off under resource pressure while remaining cancellable.
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            },
+            else => return err,
+        };
+    }
+}
+
+fn listenerStopped(s: *State, label: []const u8, err: anyerror) void {
+    if (err == error.Canceled) return;
+    std.log.err("{s} listener stopped: {s}", .{ label, @errorName(err) });
+    s.mutex.lockUncancelable(s.io);
+    s.listener_failure = err;
+    s.mutex.unlock(s.io);
+    s.stop.set(s.io);
+}
+
+test "listeners retry resource failures and propagate terminal errors" {
+    const Mock = struct {
+        accepts: usize = 0,
+        sleeps: usize = 0,
+        cancel_sleep: bool = false,
+        fn accept(context: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.accepts += 1;
+            return switch (self.accepts) {
+                1 => error.ProcessFdQuotaExceeded,
+                2 => error.SystemFdQuotaExceeded,
+                3 => error.SystemResources,
+                4 => error.ConnectionAborted,
+                else => error.SocketNotListening,
+            };
+        }
+        fn sleep(context: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleeps += 1;
+            if (self.cancel_sleep) return error.Canceled;
+        }
+    };
+    var mock: Mock = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.netAccept = Mock.accept;
+    vtable.sleep = Mock.sleep;
+    const io: Io = .{ .userdata = &mock, .vtable = &vtable };
+    var server: Io.net.Server = undefined;
+    try std.testing.expectError(error.SocketNotListening, acceptRetry(io, &server));
+    try std.testing.expectEqual(@as(usize, 5), mock.accepts);
+    try std.testing.expectEqual(@as(usize, 4), mock.sleeps);
+    mock = .{ .cancel_sleep = true };
+    try std.testing.expectError(error.Canceled, acceptRetry(io, &server));
+    try std.testing.expectEqual(@as(usize, 1), mock.accepts);
 }
 const HttpControl = struct {
     abort: Io.Event = .unset,
