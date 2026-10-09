@@ -14,8 +14,10 @@ export async function regressions(browser: Browser, url: string) {
     total: 0,
     peers: [{ name: "Peer", address: "localhost" }],
     pending: null,
+    tailcat: { available: true, active: false, enabled: false, invite: "", error: "" },
   };
   const calls: string[] = [];
+  const recipients: string[] = [];
   let offline = false;
   let failNew = true;
   let failUpload = false;
@@ -23,6 +25,7 @@ export async function regressions(browser: Browser, url: string) {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     calls.push(path);
+    if (path === "/api/send") recipients.push(route.request().postDataJSON().to);
     if (path === "/api/state") {
       if (offline) return route.abort();
       return route.fulfill({ json: state });
@@ -78,6 +81,28 @@ export async function regressions(browser: Browser, url: string) {
     assert(await page.locator("#send").isDisabled());
     offline = false;
     await page.locator("#online").filter({ hasText: "Ready to receive" }).waitFor();
+    // Editing a submitted invitation invalidates the recipient immediately.
+    await page.getByRole("button", { name: /Across a distance/ }).click();
+    const first = "xfer-tailcat:9000:tcABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop";
+    const second = "xfer-tailcat:9001:tcABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop";
+    await page.locator("#remote-invite").fill(first);
+    await page.locator("#remote-connect").click();
+    assert(await page.locator("#send").isEnabled());
+    await page.getByRole("link", { name: "Receive", exact: true }).click();
+    await page.getByRole("link", { name: "Share files", exact: true }).click();
+    assert.equal(await page.locator("#remote-invite").inputValue(), first);
+    await page.locator("#remote-invite").fill(second);
+    assert(await page.locator("#send").isDisabled(), "Changed invitation must clear recipient");
+    assert.equal(await page.locator(".destination-chip").count(), 0);
+    await page.locator("#remote-invite").fill("");
+    assert(await page.locator("#send").isDisabled(), "Empty invitation must clear recipient");
+    await page.locator("#remote-invite").fill(second);
+    await page.locator("#remote-connect").click();
+    failUpload = false;
+    const sent = page.waitForResponse((response) => response.url().endsWith("/api/send"));
+    await page.locator("#send").click();
+    await sent;
+    assert.deepEqual(recipients, [second], "Only the newly confirmed invitation may be sent");
     state.pending = { id: 1, code: "123456789abc", name: "test.txt", total: 4, receiving: true };
     await page.locator("#approval[open]").waitFor();
     await page.locator("#match").check();
@@ -101,7 +126,9 @@ export async function regressions(browser: Browser, url: string) {
     const count = calls.filter((path) => path === "/api/state").length;
     await page.waitForTimeout(1300);
     assert.equal(calls.filter((path) => path === "/api/state").length, count, "Quit stops polling");
-    console.log("PASS React ownership, reconnect, decision retry, stale/expired consent and quit");
+    console.log(
+      "PASS React ownership, reconnect, stale invitation, decision retry, consent and quit",
+    );
   } finally {
     await page.close();
   }

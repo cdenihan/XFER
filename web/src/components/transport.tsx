@@ -48,7 +48,9 @@ export function TransportChoice() {
 export function RemoteDestination({ disabled }: { disabled: boolean }) {
   const remote = useLive(selectRemote);
   const { destination, setDestination } = useSession();
-  const [invite, setInvite] = useState("");
+  const [invite, setInvite] = useState(() =>
+    destination?.address.startsWith("xfer-tailcat:") ? destination.address : "",
+  );
   const [error, setError] = useState("");
   return (
     <section className="panel remote-destination">
@@ -82,7 +84,11 @@ export function RemoteDestination({ disabled }: { disabled: boolean }) {
           id="remote-invite"
           placeholder="xfer-tailcat:9000:tc…"
           value={invite}
-          onChange={(event) => setInvite(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setInvite(value);
+            if (value.trim() !== destination?.address) setDestination(null);
+          }}
           disabled={disabled || !remote.data?.available}
           rows={4}
           autoComplete="off"
