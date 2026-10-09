@@ -8,11 +8,13 @@ const install = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
   stderr: "inherit",
 });
 if ((await install.exited) !== 0) process.exit(1);
-process.env.NODE_ENV = "production";
-const { build } = await import("vite-plus");
-await build({
-  configFile: join(root, "vite.config.ts"),
-  root,
-  build: { outDir: join(output, "dist"), emptyOutDir: true },
+// Launch after installation: Bun may resolve literal dynamic imports before
+// executing this script and otherwise autoinstall Vite+ outside our lockfile.
+const build = Bun.spawn(["bun", "--bun", "run", "vp", "build", "--outDir", join(output, "dist")], {
+  cwd: root,
+  env: { ...process.env, NODE_ENV: "production" },
+  stdout: "inherit",
+  stderr: "inherit",
 });
+if ((await build.exited) !== 0) process.exit(1);
 await pack(join(output, "dist"), output);
