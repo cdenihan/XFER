@@ -4,15 +4,16 @@
 
 Use Zig **0.17.0**. The migration began with the installed `zig init` command;
 its package fingerprint is retained. The native engine has no C bindings, Rust components, or external
-networking/crypto libraries. The frontend uses Bun **1.4.0** and Vite+
-**1.1.0**, with TypeScript, Tailwind and TanStack Query pinned in `web/bun.lock`.
+networking/crypto libraries. The frontend uses Bun **1.4.2** and Vite+
+**1.1.0**, with React, TypeScript, CSS, TanStack Router and Query pinned in `web/bun.lock`.
 Use the [language reference](https://ziglang.org/documentation/0.17.0/) and the
 standard-library source shipped with that exact compiler version.
 
 ```sh
 zig fmt --check build.zig src
-(cd web && bun install --frozen-lockfile && bun run check && bun run test)
+(cd web && bun install --frozen-lockfile && bun run check && bun run test && bun run build)
 zig build test
+python3 tests/build_cache.py
 zig build -Doptimize=ReleaseSafe
 python3 tests/integration.py zig-out/bin/xfer
 python3 tests/desktop.py zig-out/bin/xfer
@@ -30,8 +31,9 @@ permission to bind local TCP/UDP ports and uses isolated temporary directories.
 | `main.zig` | Process entry, errors and exit status |
 | `cli.zig` | Strict arguments, launch routing, terminal menu, listener lifecycle |
 | `desktop.zig` | Loopback capability API, selection staging, jobs and browser consent |
-| `web/src/` | TypeScript browser controls, TanStack Query polling, Tailwind styles |
-| `web/scripts/embed.ts` | Converts Vite+ assets into a generated Zig module of static bytes |
+| `web/src/` | React views, TanStack Router navigation, Query selectors/actions, CSS tokens and responsive layouts |
+| `web/scripts/embed.ts` | Packs deterministic gzip assets into a binary blob and a small Zig index |
+| `ui_http.zig` | Encoding negotiation, conditional GET, immutable asset caching and bounded identity fallback |
 | `reporter.zig` | JSON/human events and bounded terminal input |
 | `discovery.zig` | Nonce-bound UDP queries and source-address replies |
 | `manifest.zig` | Snapshot planning, streaming hashes, inventory validation |
@@ -135,7 +137,7 @@ to `dist/`. Linux uses musl. Archives include the executable, README, security
 notes and VERSION. Windows archives are ZIP; macOS/Linux archives are tar.gz.
 The script requires Python's standard library, Zig and Bun. `zig build`
 automatically installs the frozen frontend lockfile, runs Vite+ using Bun
-(`bun --bun run vp build`), and embeds its output. The browser assets live in
+(Vite+'s build API), and embeds its output. The browser assets live in
 the executable; neither assets nor executable helpers are extracted at launch.
 
 Pushing a tag `v<VERSION>` starts native tests and cross-builds before publishing
@@ -144,12 +146,37 @@ The rewritten release flow uses no private Rust toolkit or dependency token.
 
 ## UI iteration
 
+Start the complete development app with one command:
+
+```sh
+cd web
+bun install --frozen-lockfile
+bun run dev
+```
+
+Bun builds and starts Zig, starts Vite+ with the authenticated loopback proxy,
+and prints the frontend URL with the launch capability. Ctrl+C stops both
+processes. Vite+ hot reloads the React UI; changes to Zig require a restart.
+Bun owns development tooling; the Zig process owns the API and native transfer
+engine. Production embeds the Vite+ build in the executable and needs no Bun
+installation on the recipient's machine.
+
+The Share (`/`) and Receive (`/receive`) views use TanStack Router. Selection,
+destination, upload actions and TanStack Query's live state belong to a shared
+session, so navigation preserves the queue and active work. Reload restores
+backend state and authentication; browser file selections must be chosen again.
+The root shell owns consent dialogs, progress and shutdown on both routes.
+Mutations are never retried automatically. New requests reset code confirmation;
+rejected staging creation never cancels an incoming transfer.
+
+For an independently launched backend:
+
 Build `zig build -Doptimize=ReleaseSafe` and launch `zig-out/bin/xfer --no-open`.
 The URL contains a fresh capability in its fragment. In another terminal:
 
 ```sh
 cd web
-XFER_DEV_URL=http://127.0.0.1:PORT bun run dev
+XFER_DEV_URL=http://127.0.0.1:PORT bun run dev:web
 ```
 
 Open `http://127.0.0.1:5173/#CAPABILITY` using the port/capability printed by
@@ -158,16 +185,34 @@ host while preserving bearer authorization. It never enables CORS on the
 production host. Restarting XFER creates a new capability; update the dev proxy
 port and fragment. On Windows set `$env:XFER_DEV_URL` before `bun run dev`.
 
-`bun run build` inside `web/` builds the frontend independently and generates
-`web/ui-assets.generated.zig` for inspection. The native build generates its
-own module in the Zig cache with an explicit build dependency, so changes to
-HTML, TypeScript, CSS and hashed asset names are rebuilt into the executable.
-Generated files and `web/dist/` are not committed.
+`bun run build` inside `web/` produces `web/dist/` and a compressed asset pack
+in `web/.generated/ui/` (`assets.bin`, `assets.zig`, `stats.json`). The native
+build produces an isolated pack in the Zig cache. It explicitly tracks every
+frontend source/public file, package lockfile and build script; directory
+creation/deletion invalidates the configuration too. The same target-independent
+pack is reused for all six native targets. Unchanged builds skip Bun, dependency
+installation and Vite+ completely. Only generated metadata is Zig source;
+`@embedFile("assets.bin")` embeds the compressed payload as read-only bytes.
 
-The UI regression suite executes the actual TypeScript code using Bun's
-transpiler and TanStack Query with DOM/fetch adapters. The real Chromium smoke
-test selects a file, checks the comparison code on both windows, approves,
-verifies delivered bytes, reloads and quits:
+Browsers accepting gzip get those bytes directly, with no runtime compression,
+asset extraction or helper processes. Identity-only clients use a bounded,
+request-local decompression fallback. Hashed assets get immutable caching;
+HTML/public assets revalidate with content ETags. Host/Origin checks and CSP
+still apply; control API responses remain uncached. See
+[frontend architecture and measurements](FRONTEND.md) for the research and decisions.
+
+A single poll owner runs every 2 seconds idle, 300 ms during transfers, and
+1 second after connection failures, including when the tab is in the background.
+Other components subscribe to selected state fields without adding timers.
+File totals are computed only when the selection changes. Queue rendering is
+paginated in batches of 100; filtering scans names only when its input or the
+selection changes. Browser directory traversal uses one accumulator, avoiding
+repeated copies and large argument spreads.
+
+Vite+ tests cover staging ownership, upload failures, path encoding and complete
+directory enumeration. The Chromium suite exercises the actual React controls,
+route navigation and reload, reconnects, stale approvals, explicit consent,
+encrypted delivery, mobile overflow and quit:
 
 ```sh
 cd web
@@ -181,3 +226,10 @@ from PATH and verifies that UI operation creates no asset/helper files. Native
 CI runs transfer/API/isolation tests on Linux, macOS and Windows; Linux also
 runs the real browser test. Release packages are built once in CI and published
 from those verified artifacts.
+
+## Optional remote transport
+
+See [TAILCAT.md](TAILCAT.md) for helper installation, source provenance, real
+helper integration tests and paired backend benchmarks. `src/tailcat.zig` owns
+bounded startup parsing and subprocess arguments; the desktop engine owns
+helper cancellation and exposes only the native transfer port.

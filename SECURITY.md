@@ -118,3 +118,13 @@ every filesystem. Received metadata/permissions are not reproduced.
 This is a new protocol implementation, not an independently audited product.
 The automated tests verify concrete failure cases; they do not prove the
 absence of vulnerabilities.
+
+## Optional Tailcat transport
+
+Remote invitations are bearer capabilities. Share them privately and stop remote
+receiving after use. Tailcat exposes only the native transfer listener; XFER
+keeps its authenticated browser control server on loopback. Both peers still
+compare and approve the XFER verification code, and native hash validation and
+atomic publication remain in effect. The helper is an independently installed
+trusted executable, selected through PATH or `XFER_TAILCAT_BIN`. See
+[remote transport details](docs/TAILCAT.md) for its network and lifecycle scope.
