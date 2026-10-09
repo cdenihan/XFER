@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build self-contained release archives with Zig; no package dependencies."""
+"""Build single-executable archives with the Bun/Vite+ UI compiled into Zig."""
 import hashlib
 from pathlib import Path
 import re
@@ -31,12 +31,12 @@ def main():
             if windows:
                 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
                     z.write(binary, binary.name)
-                    for file in ('README.md', 'SECURITY.md', 'VERSION'):
+                    for file in ('README.md', 'SECURITY.md', 'VERSION', 'docs/FRONTEND.md', 'docs/TAILCAT.md', 'docs/DEVELOPMENT.md'):
                         z.write(ROOT / file, file)
             else:
                 with tarfile.open(archive, 'w:gz') as t:
                     t.add(binary, arcname=binary.name)
-                    for file in ('README.md', 'SECURITY.md', 'VERSION'):
+                    for file in ('README.md', 'SECURITY.md', 'VERSION', 'docs/FRONTEND.md', 'docs/TAILCAT.md', 'docs/DEVELOPMENT.md'):
                         t.add(ROOT / file, arcname=file)
             checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
             (output / (archive.name + '.sha256')).write_text(f'{checksum}  {archive.name}\n')

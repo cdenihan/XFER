@@ -9,22 +9,19 @@ jobs:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
-  package:
+  publish:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/download-artifact@v4
         with:
-          version: 0.17.0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.x'
-      - name: Check tag and package all targets
+          name: release-packages
+          path: dist/
+      - name: Check tag
         run: |
           test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
-          python scripts/package.py
       - name: Publish verified artifacts
         env:
           GH_TOKEN: ${{ github.token }}
