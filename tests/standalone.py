@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run the lone release binary away from the checkout with no runtime on PATH."""
+import gzip
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,6 +27,11 @@ def run():
             app = desktop.Desktop(root / 'session', 'Standalone')
             page, _ = app.request('/', method='GET')
             assert b'/assets/' in page
+            for asset in re.findall(rb'(?:src|href)="(/assets/[^\"]+)"', page):
+                body, headers = app.request(asset.decode(), method='GET', headers={'Accept-Encoding': 'gzip'})
+                assert dict(headers)['Content-Encoding'] == 'gzip'
+                assert gzip.decompress(body), 'Standalone UI asset is missing'
+
             app.prepare('selected.bin', [('selected.bin', b'private selection')])
             app.close()
             assert set(install.iterdir()) == {binary}, 'An asset or native helper was extracted'

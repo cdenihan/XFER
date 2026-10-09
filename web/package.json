@@ -2,25 +2,30 @@
   "name": "xfer-web",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.0",
   "scripts": {
-    "dev": "bun --bun run vp dev",
+    "dev": "bun scripts/dev.ts",
     "build": "bun --bun run vp build && bun scripts/embed.ts",
-    "check": "tsc --noEmit",
-    "test": "bun ../tests/ui.js"
+    "check": "bun --bun run vp check && tsc --noEmit",
+    "test": "bun --bun run vp test run",
+    "dev:web": "bun --bun run vp dev"
   },
   "dependencies": {
-    "@tanstack/query-core": "5.90.16"
+    "@tanstack/react-query": "5.104.1",
+    "@tanstack/react-router": "1.170.41",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.3.3",
     "@types/bun": "1.4.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "playwright": "1.58.2",
-    "tailwindcss": "4.3.3",
     "typescript": "6.0.3",
     "vite-plus": "1.1.0"
   },
   "overrides": {
     "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0"
-  }
+  },
+  "packageManager": "bun@1.4.2"
 }

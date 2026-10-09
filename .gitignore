@@ -10,4 +10,7 @@ __pycache__/
 node_modules/
 web/dist/
 web/ui-assets.generated.zig
+web/.generated/
 work/
+
+.tools/
