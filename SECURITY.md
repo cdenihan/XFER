@@ -67,7 +67,7 @@ does not open, execute or scan received files.
 
 ## Browser control surface
 
-The browser server binds only to `127.0.0.1` on a random port, separate from the
+The Zig browser server binds only to `127.0.0.1` on a random port, separate from the
 LAN transfer listener. A fresh 256-bit capability starts in the launch URL's
 fragment, is removed from the address bar, and is retained in same-origin
 sessionStorage for reloads. Every API request requires its bearer header. Exact

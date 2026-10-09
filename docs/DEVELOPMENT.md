@@ -3,17 +3,20 @@
 ## Toolchain
 
 Use Zig **0.17.0**. The migration began with the installed `zig init` command;
-its package fingerprint is retained. There are no fetched application
-packages, C bindings, Rust components, or external networking/crypto libraries.
+its package fingerprint is retained. The native engine has no C bindings, Rust components, or external
+networking/crypto libraries. The frontend uses Bun **1.4.0** and Vite+
+**1.1.0**, with TypeScript, Tailwind and TanStack Query pinned in `web/bun.lock`.
 Use the [language reference](https://ziglang.org/documentation/0.17.0/) and the
 standard-library source shipped with that exact compiler version.
 
 ```sh
 zig fmt --check build.zig src
+(cd web && bun install --frozen-lockfile && bun run check && bun run test)
 zig build test
 zig build -Doptimize=ReleaseSafe
 python3 tests/integration.py zig-out/bin/xfer
 python3 tests/desktop.py zig-out/bin/xfer
+python3 tests/standalone.py zig-out/bin/xfer
 ```
 
 If a sandbox disallows the default compiler cache, point
@@ -27,7 +30,8 @@ permission to bind local TCP/UDP ports and uses isolated temporary directories.
 | `main.zig` | Process entry, errors and exit status |
 | `cli.zig` | Strict arguments, launch routing, terminal menu, listener lifecycle |
 | `desktop.zig` | Loopback capability API, selection staging, jobs and browser consent |
-| `ui/` | Embedded browser interface, no bundler or runtime packages |
+| `web/src/` | TypeScript browser controls, TanStack Query polling, Tailwind styles |
+| `web/scripts/embed.ts` | Converts Vite+ assets into a generated Zig module of static bytes |
 | `reporter.zig` | JSON/human events and bounded terminal input |
 | `discovery.zig` | Nonce-bound UDP queries and source-address replies |
 | `manifest.zig` | Snapshot planning, streaming hashes, inventory validation |
@@ -129,8 +133,51 @@ python3 scripts/package.py
 This builds six `ReleaseSafe` binaries and writes archives and SHA-256 sidecars
 to `dist/`. Linux uses musl. Archives include the executable, README, security
 notes and VERSION. Windows archives are ZIP; macOS/Linux archives are tar.gz.
-The script requires only Python's standard library and Zig.
+The script requires Python's standard library, Zig and Bun. `zig build`
+automatically installs the frozen frontend lockfile, runs Vite+ using Bun
+(`bun --bun run vp build`), and embeds its output. The browser assets live in
+the executable; neither assets nor executable helpers are extracted at launch.
 
 Pushing a tag `v<VERSION>` starts native tests and cross-builds before publishing
 release archives. Release jobs reject a tag that disagrees with VERSION.
 The rewritten release flow uses no private Rust toolkit or dependency token.
+
+## UI iteration
+
+Build `zig build -Doptimize=ReleaseSafe` and launch `zig-out/bin/xfer --no-open`.
+The URL contains a fresh capability in its fragment. In another terminal:
+
+```sh
+cd web
+XFER_DEV_URL=http://127.0.0.1:PORT bun run dev
+```
+
+Open `http://127.0.0.1:5173/#CAPABILITY` using the port/capability printed by
+XFER. The development-only proxy rewrites Host/Origin to that exact loopback
+host while preserving bearer authorization. It never enables CORS on the
+production host. Restarting XFER creates a new capability; update the dev proxy
+port and fragment. On Windows set `$env:XFER_DEV_URL` before `bun run dev`.
+
+`bun run build` inside `web/` builds the frontend independently and generates
+`web/ui-assets.generated.zig` for inspection. The native build generates its
+own module in the Zig cache with an explicit build dependency, so changes to
+HTML, TypeScript, CSS and hashed asset names are rebuilt into the executable.
+Generated files and `web/dist/` are not committed.
+
+The UI regression suite executes the actual TypeScript code using Bun's
+transpiler and TanStack Query with DOM/fetch adapters. The real Chromium smoke
+test selects a file, checks the comparison code on both windows, approves,
+verifies delivered bytes, reloads and quits:
+
+```sh
+cd web
+bunx --no-install playwright install chromium
+bun scripts/browser.ts ../zig-out/bin/xfer
+```
+
+Set `XFER_CHROMIUM` to an existing Chromium executable to use it instead. The
+standalone test copies only `xfer` into an isolated directory, removes runtimes
+from PATH and verifies that UI operation creates no asset/helper files. Native
+CI runs transfer/API/isolation tests on Linux, macOS and Windows; Linux also
+runs the real browser test. Release packages are built once in CI and published
+from those verified artifacts.

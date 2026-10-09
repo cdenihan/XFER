@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -100,8 +101,17 @@ def run():
         receiver = Desktop(root / 'receiver', 'Receiver')
         try:
             page, headers = sender.request('/', method='GET')
+            built_ui = Path(__file__).resolve().parent.parent / 'web' / 'dist'
+            assert page == (built_ui / 'index.html').read_bytes(), 'Embedded UI is stale'
             assert b'Drop files or a folder here' in page
             assert b'webkitdirectory' in page
+            for asset in re.findall(rb'(?:src|href)="(/assets/[^\"]+)"', page):
+                data, asset_headers = sender.request(asset.decode(), method='GET')
+                assert data, 'Embedded asset is empty'
+                assert data == (built_ui / asset.decode().lstrip('/')).read_bytes(), 'Embedded asset differs from the Vite+ build'
+                content_type = dict(asset_headers)['Content-Type']
+                assert ('javascript' in content_type if asset.endswith(b'.js') else 'text/css' in content_type), content_type
+            sender.request('/missing', method='GET', status=404)
             assert "frame-ancestors 'none'" in dict(headers)['Content-Security-Policy']
             sender.request('/api/state', method='GET', headers={'Authorization': 'Bearer wrong'}, status=401)
             sender.request('/api/state', method='GET', headers={'Origin': 'https://malicious.example'}, status=403)

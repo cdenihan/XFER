@@ -1,23 +1,38 @@
-'use strict';
+import './style.css';
+import { QueryClient, QueryObserver } from '@tanstack/query-core';
 
-const element = (id) => document.getElementById(id);
+type Peer = { name: string; address: string };
+type Pending = { id: number; code: string; name: string; total: number; receiving: boolean };
+type State = { name: string; output: string; phase: string; message: string; busy: boolean; bytes: number; total: number; peers: Peer[]; pending: Pending | null };
+type Item = { path: string; file?: File; directory?: boolean };
+type Selection = { items: Item[]; root: string; folder: boolean };
+// These controls have stable IDs in index.html; input/dialog-only members are
+// accessed exclusively on their corresponding controls.
+type Control = HTMLElement & Pick<HTMLInputElement, 'value' | 'checked' | 'disabled' | 'files'> & Pick<HTMLDialogElement, 'open' | 'close' | 'showModal'>;
+
+
+const element = (id: string) => {
+  const node = document.getElementById(id);
+  if (!node) throw new Error(`Missing control: ${id}`);
+  return node as Control;
+};
 const token = location.hash.slice(1) || sessionStorage.getItem('xfer-capability') || '';
 if (token) {
   sessionStorage.setItem('xfer-capability', token);
   history.replaceState(null, '', location.pathname);
 }
 
-let selection = null;
-let destination = null;
-let current = null;
+let selection: Selection | null = null;
+let destination: Peer | null = null;
+let current: State | null = null;
 let preparing = false;
-let pendingId = null;
+let pendingId: number | null = null;
 let disconnected = false;
 let pollFailed = false;
-let localError = null;
-let renderedPeers = null;
+let localError: string | null = null;
+let renderedPeers: string | null = null;
 
-const errors = {
+const errors: Record<string, string> = {
   Timeout: 'The other computer did not respond in time. Check its firewall and try again.',
   ConnectionRefused: 'The other computer is not receiving. Open XFER there and try again.',
   Declined: 'The transfer was declined.',
@@ -33,9 +48,9 @@ const errors = {
   Canceled: 'Transfer canceled.',
   StaleApproval: 'This request has expired.',
 };
-const failure = (error) => errors[error] || 'The transfer could not finish. Check the other computer and try again.';
+const failure = (error: string) => errors[error] || 'The transfer could not finish. Check the other computer and try again.';
 
-function size(bytes) {
+function size(bytes: number) {
   if (bytes < 1024) return bytes + ' B';
   const units = ['KiB', 'MiB', 'GiB', 'TiB'];
   let index = -1;
@@ -46,7 +61,7 @@ function size(bytes) {
   return bytes.toFixed(bytes >= 10 ? 0 : 1) + ' ' + units[index];
 }
 
-async function api(path, body, method = 'POST', extraHeaders = {}) {
+async function api<T = Record<string, never>>(path: string, body?: unknown, method = 'POST', extraHeaders: Record<string, string> = {}): Promise<T> {
   const file = body instanceof File;
   const response = await fetch('/api/' + path, {
     method,
@@ -55,14 +70,14 @@ async function api(path, body, method = 'POST', extraHeaders = {}) {
       ...(file ? {} : { 'Content-Type': 'application/json' }),
       ...extraHeaders,
     },
-    body: body === undefined ? undefined : file ? body : JSON.stringify(body),
+    body: body === undefined ? undefined : file ? body as File : JSON.stringify(body),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(failure(result.error));
   return result;
 }
 
-function notice(message) {
+function notice(message: string) {
   localError = message;
   element('status').hidden = false;
   element('status-text').textContent = message;
@@ -80,7 +95,7 @@ function updateControls() {
     : 'Choose files and a receiving computer.';
 }
 
-function select(items, root, folder) {
+function select(items: Item[], root: string, folder: boolean) {
   if (preparing || current?.busy) return;
   localError = null;
   selection = items.length || folder ? { items, root, folder } : null;
@@ -94,9 +109,9 @@ function select(items, root, folder) {
   updateControls();
 }
 
-function fromFiles(files) {
-  const items = Array.from(files);
-  if (!items.length) return select([], null, false);
+function fromFiles(files: FileList | null) {
+  const items = Array.from(files || []);
+  if (!items.length) return select([], "", false);
   if (items[0].webkitRelativePath) {
     select(items.map((file) => ({ file, path: file.webkitRelativePath })),
       items[0].webkitRelativePath.split('/')[0], true);
@@ -112,22 +127,22 @@ for (const [button, input] of [['choose', 'files'], ['choose-folder', 'folder']]
     element(input).value = '';
     element(input).click();
   };
-  element(input).onchange = (event) => fromFiles(event.target.files);
+  element(input).onchange = (event) => fromFiles((event.target as HTMLInputElement).files);
 }
-element('clear').onclick = () => select([], null, false);
+element('clear').onclick = () => select([], "", false);
 
 // Directory readers return batches; read until exhausted and retain empty folders.
-async function walk(entry, prefix = '') {
+async function walk(entry: FileSystemEntry, prefix = ''): Promise<Item[]> {
   const path = prefix + entry.name;
   if (entry.isFile) {
-    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
     return [{ file, path }];
   }
   if (!entry.isDirectory) return [];
-  const items = [{ path, directory: true }];
-  const reader = entry.createReader();
+  const items: Item[] = [{ path, directory: true }];
+  const reader = (entry as FileSystemDirectoryEntry).createReader();
   while (true) {
-    const entries = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    const entries = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
     if (!entries.length) break;
     for (const child of entries) items.push(...await walk(child, path + '/'));
   }
@@ -144,10 +159,10 @@ element('drop').ondrop = async (event) => {
   element('drop').classList.remove('over');
   if (preparing || current?.busy) return;
   try {
-    const entries = Array.from(event.dataTransfer.items || [])
-      .map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
-    if (!entries.length) return fromFiles(event.dataTransfer.files);
-    let items = [];
+    const entries = Array.from(event.dataTransfer?.items || [])
+      .map((item) => item.webkitGetAsEntry?.()).filter((entry): entry is FileSystemEntry => entry !== null);
+    if (!entries.length) return fromFiles(event.dataTransfer?.files || null);
+    let items: Item[] = [];
     for (const entry of entries) items.push(...await walk(entry));
     if (entries.length === 1) {
       select(items, entries[0].name, entries[0].isDirectory);
@@ -160,7 +175,7 @@ element('drop').ondrop = async (event) => {
 };
 
 const computerIcon = '<svg width="25" height="25" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M8 20h8m-4-4v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
-function showPeers(peers) {
+function showPeers(peers: Peer[]) {
   const key = JSON.stringify([peers, destination?.address]);
   if (key === renderedPeers) return;
   renderedPeers = key;
@@ -189,7 +204,7 @@ function showPeers(peers) {
     button.append(icon, name, address);
     button.onclick = () => {
       destination = peer;
-      showPeers(current.peers);
+      showPeers(current?.peers || []);
       updateControls();
     };
     container.append(button);
@@ -225,10 +240,11 @@ element('send').onclick = async () => {
     element('selection-detail').textContent = 'Your files stay between these two computers.';
     element('clear').hidden = true;
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Request failed";
     if (uploadCreated) {
       try { await api('cancel', {}); } catch { }
     }
-    notice(error.message === 'Failed to fetch' ? 'File preparation was interrupted. Select the files and try again.' : error.message);
+    notice(message === 'Failed to fetch' ? 'File preparation was interrupted. Select the files and try again.' : message);
   } finally {
     preparing = false;
     updateControls();
@@ -236,11 +252,12 @@ element('send').onclick = async () => {
 };
 
 element('cancel').onclick = async () => {
-  try { await api('cancel', {}); } catch (error) { notice(error.message); }
+  try { await api('cancel', {}); } catch (error) {
+    const message = error instanceof Error ? error.message : "Request failed"; notice(message); }
 };
 element('match').onchange = () => { element('accept').disabled = !element('match').checked; };
 
-async function decide(approve) {
+async function decide(approve: boolean) {
   if (!current?.pending) return;
   const pending = current.pending;
   element('accept').disabled = element('decline').disabled = true;
@@ -248,10 +265,11 @@ async function decide(approve) {
     await api('decision', { id: pending.id, approve, code: pending.code });
     element('approval').close();
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Request failed";
     if (current?.pending?.id === pending.id && current.pending.code === pending.code) {
       element('accept').disabled = !element('match').checked;
     }
-    notice(error.message);
+    notice(message);
   } finally {
     element('decline').disabled = false;
   }
@@ -267,17 +285,20 @@ element('quit').onclick = async () => {
   try {
     await api('quit', {});
     disconnected = true;
+    unsubscribe();
+    queryClient.clear();
     element('online').textContent = 'XFER is closed';
     element('status').hidden = false;
     element('status-text').textContent = 'You can close this window. Launch XFER to share again.';
     element('cancel').hidden = element('progress').hidden = true;
     updateControls();
   } catch (error) {
-    notice(error.message);
+    const message = error instanceof Error ? error.message : "Request failed";
+    notice(message);
   }
 };
 
-function showStatus(state) {
+function showStatus(state: State) {
   if (localError) return notice(localError);
   if (state.phase === 'ready') return;
   element('status').hidden = false;
@@ -293,7 +314,7 @@ function showStatus(state) {
   element('stats').textContent = progress ? size(state.bytes) + ' of ' + size(state.total) : '';
 }
 
-function showApproval(pending) {
+function showApproval(pending: Pending | null) {
   if (!pending) {
     pendingId = null;
     if (element('approval').open) element('approval').close();
@@ -310,24 +331,28 @@ function showApproval(pending) {
   if (!element('approval').open) element('approval').showModal();
 }
 
-async function poll() {
+const queryClient = new QueryClient();
+const observer = new QueryObserver<State>(queryClient, {
+  queryKey: ['state'], queryFn: () => api<State>('state', undefined, 'GET'),
+  refetchInterval: 600, refetchIntervalInBackground: true, retry: false,
+});
+const unsubscribe = observer.subscribe((result) => {
   if (disconnected) return;
-  try {
-    current = await api('state', undefined, 'GET');
-    if (pollFailed) { localError = null; pollFailed = false; element('status').hidden = true; }
-    element('identity').textContent = current.name;
-    element('destination').textContent = 'Saved to ' + current.output;
-    element('online').textContent = current.busy ? 'Sharing in progress' : 'Ready to receive';
-    showPeers(current.peers);
-    showStatus(current);
-    showApproval(current.pending);
-    updateControls();
-  } catch {
+  if (result.isError) {
     pollFailed = true;
     element('online').textContent = 'Reconnecting…';
     notice('Connection interrupted. Retrying…');
     updateControls();
+    return;
   }
-  setTimeout(poll, 600);
-}
-poll();
+  if (!result.data) return;
+  current = result.data;
+  if (pollFailed) { localError = null; pollFailed = false; element('status').hidden = true; }
+  element('identity').textContent = current.name;
+  element('destination').textContent = 'Saved to ' + current.output;
+  element('online').textContent = current.busy ? 'Sharing in progress' : 'Ready to receive';
+  showPeers(current.peers);
+  showStatus(current);
+  showApproval(current.pending);
+  updateControls();
+});

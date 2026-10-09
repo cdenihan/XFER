@@ -25,7 +25,16 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
-      - run: node tests/ui.js
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run build
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+      - run: bun tests/ui.js
       - name: LAN benchmark harness regressions
         if: runner.os != 'Windows'
         run: python tests/benchmark.py
@@ -38,6 +47,17 @@ jobs:
       - name: Browser workflow integration
         shell: bash
         run: python tests/desktop.py zig-out/bin/xfer${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Single executable isolation
+        shell: bash
+        run: python tests/standalone.py zig-out/bin/xfer${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Install browser
+        if: runner.os == 'Linux'
+        working-directory: web
+        run: bunx --no-install playwright install --with-deps chromium
+      - name: Real browser transfer
+        if: runner.os == 'Linux'
+        working-directory: web
+        run: bun scripts/browser.ts ../zig-out/bin/xfer
   cross:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -50,4 +70,26 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
       - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: python scripts/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/

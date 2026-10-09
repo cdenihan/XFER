@@ -1,6 +1,6 @@
 # XFER
 
-Nearby file sharing for Windows, macOS, and Linux, written in **Zig 0.17.0**.
+Nearby file sharing for Windows, macOS, and Linux, with a **Zig 0.17.0** native engine and a **TypeScript** browser UI.
 Open XFER on two computers, choose a nearby receiver, compare the code, and send
 a file or folder. No accounts, cloud, server deployment, or runtime packages.
 
@@ -10,14 +10,17 @@ protocol or establish Bluetooth/AWDL/Wi-Fi Direct connections.
 
 ## Build
 
-Install [Zig 0.17.0](https://ziglang.org/download/) and run:
+Install [Zig 0.17.0](https://ziglang.org/download/) and [Bun 1.4.0](https://bun.sh/), then run:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ```
 
-The executable is `zig-out/bin/xfer` (`xfer.exe` on Windows). The application
-uses only Zig's standard library. Language and I/O APIs follow the
+The executable is `zig-out/bin/xfer` (`xfer.exe` on Windows). The build uses Bun to install locked frontend dependencies and run Vite+, then
+compiles the generated HTML, JavaScript, CSS and icons directly into the Zig
+executable. Releases contain **one executable**: no Bun runtime, native addon,
+helper binary or extracted UI assets. The native engine uses only Zig's standard
+library. Language and I/O APIs follow the
 [0.17.0 documentation](https://ziglang.org/documentation/0.17.0/).
 
 ## Share
@@ -147,10 +150,12 @@ unencrypted mode. Exit status is 0 on success and 1 on failure.
 
 ```sh
 zig fmt --check build.zig src
+(cd web && bun install --frozen-lockfile && bun run check && bun run test)
 zig build test
 zig build -Doptimize=ReleaseSafe
 python3 tests/integration.py zig-out/bin/xfer
 python3 tests/desktop.py zig-out/bin/xfer
+python3 tests/standalone.py zig-out/bin/xfer
 ```
 
 On Windows use `python tests/integration.py zig-out/bin/xfer.exe`.
@@ -191,3 +196,22 @@ atomic visibility, not a guarantee against every filesystem/power-loss scenario.
 
 See [SECURITY.md](SECURITY.md) for trust assumptions and reporting.
 The measured Rust/Zig LAN comparison is in [benchmarks](benchmarks/README.md).
+
+## Web development
+
+`web/` uses Vite+ **1.1.0**, TypeScript, Tailwind CSS 4 and TanStack Query Core.
+Bun **1.4.0** runs the Vite+ toolchain at build time. Zig serves the embedded
+assets and the existing authenticated API; discovery, encryption, hashing,
+streaming file I/O and transfer staging continue to run in Zig. The wire
+protocol and the native transfer pipeline are unchanged.
+
+Build and launch `xfer --no-open`, then start the development server:
+
+```sh
+cd web
+XFER_DEV_URL=http://127.0.0.1:PORT bun run dev
+```
+
+Open `http://127.0.0.1:5173/#CAPABILITY`, substituting the port/capability printed
+by XFER. The dev proxy forwards to that exact loopback address and preserves
+bearer authorization. See [development](docs/DEVELOPMENT.md) for details.

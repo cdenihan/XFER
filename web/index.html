@@ -5,11 +5,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>XFER · Nearby sharing</title>
-    <link rel="stylesheet" href="/style.css">
+    <link rel="icon" type="image/svg+xml" href="/icon.svg">
+
 </head>
 
 <body>
-    <div class="window">
+    <div class="window shadow-2xl">
         <header>
             <div class="brand">
                 <div class="mark" aria-hidden="true">↗</div>
@@ -22,7 +23,7 @@
         </header>
         <main>
             <div class="intro">
-                <h2>Share with a nearby computer</h2>
+                <h2 class="tracking-tight">Share with a nearby computer</h2>
                 <p>Drop your files, choose a computer, and share.</p>
             </div>
             <div class="drop" id="drop">
@@ -95,7 +96,7 @@
             <button class="button primary" id="accept" disabled>Accept</button>
         </div>
     </dialog>
-    <script src="/app.js" defer>
+    <script type="module" src="/src/app.ts">
     </script>
 </body>
 

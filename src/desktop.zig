@@ -8,6 +8,7 @@ const transfer = @import("transfer.zig");
 const discovery = @import("discovery.zig");
 const wire = @import("wire.zig");
 const net_io = @import("net_io.zig");
+const ui_assets = @import("ui_assets");
 const Reporter = @import("reporter.zig").Reporter;
 pub const Settings = struct { port: u16 = 9000, bind: []const u8 = "0.0.0.0", output: []const u8, name: []const u8, max_bytes: u64 = 16 * 1024 * 1024 * 1024, open_browser: bool = true, json: bool = false };
 const Peer = struct { name: []const u8, address: []const u8 };
@@ -479,22 +480,15 @@ fn httpInner(s: *State, stream: Io.net.Stream, control: *HttpControl) !void {
         const expected = try std.fmt.allocPrint(a, "http://{s}", .{s.host});
         if (!std.mem.eql(u8, expected, value)) return reply(&request, .forbidden, "{\"error\":\"Invalid origin\"}");
     }
-    if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/")) {
-        return request.respond(@embedFile("ui/index.html"), .{ .keep_alive = false, .extra_headers = &.{
-            .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-            .{ .name = "Cache-Control", .value = "no-store" },
-            .{ .name = "Content-Security-Policy", .value = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" },
-            .{ .name = "Referrer-Policy", .value = "no-referrer" },
-        } });
-    }
     if (request.head.method == .GET) {
-        const asset: ?struct { body: []const u8, content_type: []const u8 } =
-            if (std.mem.eql(u8, request.head.target, "/app.js")) .{ .body = @embedFile("ui/app.js"), .content_type = "text/javascript; charset=utf-8" } else if (std.mem.eql(u8, request.head.target, "/style.css")) .{ .body = @embedFile("ui/style.css"), .content_type = "text/css; charset=utf-8" } else null;
-        if (asset) |value| return request.respond(value.body, .{ .keep_alive = false, .extra_headers = &.{
-            .{ .name = "Content-Type", .value = value.content_type },
+        if (ui_assets.get(request.head.target)) |asset| return request.respond(asset.body, .{ .keep_alive = false, .extra_headers = &.{
+            .{ .name = "Content-Type", .value = asset.content_type },
             .{ .name = "Cache-Control", .value = "no-store" },
             .{ .name = "X-Content-Type-Options", .value = "nosniff" },
+            .{ .name = "Referrer-Policy", .value = "no-referrer" },
+            .{ .name = "Content-Security-Policy", .value = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" },
         } });
+        if (!std.mem.startsWith(u8, request.head.target, "/api/")) return request.respond("Not found", .{ .status = .not_found, .keep_alive = false });
     }
     const expected = try std.fmt.allocPrint(a, "Bearer {s}", .{s.token});
     if (authorization == null or !std.mem.eql(u8, authorization.?, expected)) return reply(&request, .unauthorized, "{\"error\":\"Launch XFER to open this window\"}");

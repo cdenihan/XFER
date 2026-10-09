@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { QueryClient, QueryObserver } = require('../web/node_modules/@tanstack/query-core');
 const elements = new Map();
 function node() {
   return { style: {}, classList: { add() {}, remove() {}, toggle() {} },
@@ -10,7 +11,6 @@ function node() {
     close() { this.open = false; }, showModal() { this.open = true; } };
 }
 const calls = [];
-const timers = [];
 let failState = false;
 let failNew = false;
 let failUpload = false;
@@ -20,7 +20,7 @@ const state = { name: 'Test', output: '/tmp', phase: 'ready', busy: false, peers
 const context = vm.createContext({
   document: { getElementById(id) { if (!elements.has(id)) elements.set(id, node()); return elements.get(id); }, createElement: node },
   location: { hash: '#capability', pathname: '/' }, sessionStorage: { getItem() { return ''; }, setItem() {} }, history: { replaceState() {} }, File: class File {},
-  setTimeout(fn) { timers.push(fn); },
+  QueryClient, QueryObserver, setTimeout, clearTimeout, setInterval, clearInterval,
   async fetch(url) {
     calls.push(url);
     if (url === '/api/state' && failState) throw new Error('Failed to fetch');
@@ -35,7 +35,8 @@ const context = vm.createContext({
 });
 const evaluate = (source) => vm.runInContext(source, context);
 (async () => {
-  evaluate(fs.readFileSync('src/ui/app.js', 'utf8'));
+  const source = fs.readFileSync(require('node:path').join(__dirname, '../web/src/app.ts'), 'utf8').replace(/^import .*;$/gm, '');
+  evaluate(new Bun.Transpiler({ loader: 'ts' }).transformSync(source));
   await new Promise(setImmediate);
   evaluate("selection = {root: 'file', folder: false, items: [{path: 'file', file: new File()}]}; destination = {address: 'localhost', name: 'peer'};");
   calls.length = 0;
@@ -47,14 +48,14 @@ const evaluate = (source) => vm.runInContext(source, context);
   await elements.get('send').onclick();
   assert(calls.includes('/api/cancel'), 'An owned interrupted upload must be cleaned up');
   failState = true;
-  await evaluate('poll()');
+  await evaluate('observer.refetch()');
   assert.equal(elements.get('online').textContent, 'Reconnecting…');
   failState = false;
-  await timers.pop()();
+  await evaluate('observer.refetch()');
   assert.equal(elements.get('online').textContent, 'Ready to receive');
   assert.equal(evaluate('disconnected'), false);
   state.pending = { id: 1, code: '123456789abc', receiving: true, name: 'file', total: 1 };
-  await evaluate('poll()');
+  await evaluate('observer.refetch()');
   elements.get('match').checked = true;
   elements.get('match').onchange();
   failDecision = true;
@@ -69,7 +70,7 @@ const evaluate = (source) => vm.runInContext(source, context);
   decisionPending = { ...state.pending, id: 2 };
   await elements.get('accept').onclick();
   assert.equal(elements.get('accept').disabled, true, 'A stale failure must not enable approval for a different request');
-  await evaluate('poll()');
+  await evaluate('observer.refetch()');
   elements.get('match').checked = true;
   elements.get('match').onchange();
   decisionPending = null;
@@ -77,14 +78,14 @@ const evaluate = (source) => vm.runInContext(source, context);
   assert.equal(elements.get('accept').disabled, true, 'An expired request must not be re-enabled');
   decisionPending = undefined;
   state.pending = { id: 3, code: '123456789abc', receiving: true, name: 'file', total: 1 };
-  await evaluate('poll()');
+  await evaluate('observer.refetch()');
   elements.get('match').checked = true;
   failDecision = false;
   await elements.get('accept').onclick();
   assert.equal(elements.get('approval').open, false, 'Successful acceptance must close the dialog');
   await elements.get('quit').onclick();
-  calls.length = 0;
-  await evaluate('poll()');
-  assert.equal(calls.length, 0, 'Explicit quit must stop polling');
+  assert.equal(evaluate('observer.hasListeners()'), false, 'Explicit quit must unsubscribe polling');
+  assert.equal(evaluate('queryClient.getQueryCache().getAll().length'), 0, 'Explicit quit must remove cached state');
+  evaluate('unsubscribe(); queryClient.clear()');
   console.log('PASS selection ownership, transient poll recovery, approval retry and explicit quit');
 })().catch(error => { console.error(error); process.exitCode = 1; });

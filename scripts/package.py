@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build self-contained release archives with Zig; no package dependencies."""
+"""Build single-executable archives with the Bun/Vite+ UI compiled into Zig."""
 import hashlib
 from pathlib import Path
 import re

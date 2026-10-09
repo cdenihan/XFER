@@ -4,5 +4,5 @@
     .fingerprint = 0x538182bbdbdfb064, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "VERSION", "src", "README.md", "SECURITY.md", "docs", "tests", "scripts" },
+    .paths = .{ "build.zig", "build.zig.zon", "VERSION", "src", "web", "README.md", "SECURITY.md", "docs", "tests", "scripts" },
 }
