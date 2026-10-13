@@ -6,3 +6,11 @@ target/
 *.part
 .DS_Store
 __pycache__/
+
+node_modules/
+web/dist/
+web/ui-assets.generated.zig
+web/.generated/
+work/
+
+.tools/

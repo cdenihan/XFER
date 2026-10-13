@@ -2,7 +2,7 @@
 
 ## From source
 
-Install [Zig 0.17.0](https://ziglang.org/download/) for your computer.
+Install [Zig 0.17.0](https://ziglang.org/download/) and [Bun 1.4.0](https://bun.sh/) for your computer.
 Clone the repository, then build:
 
 ```sh
@@ -10,7 +10,9 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 macOS/Linux executable: `zig-out/bin/xfer`. Windows: `zig-out/bin/xfer.exe`.
-The resulting executable needs no Zig installation on the recipient's computer.
+`zig build` runs the Bun/Vite+ frontend build and embeds its output. The
+resulting single executable needs no Zig or Bun installation on the recipient's
+computer and extracts no browser assets or native helpers.
 
 For a local user installation on macOS/Linux:
 

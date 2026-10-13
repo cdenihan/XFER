@@ -1,0 +1,305 @@
+{
+  "measured_at": "2026-10-09T20:42:37.811490+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "binary_sha256": "dd104a10f2ba7074b70a76045230693a8ca3e0723ae188c089d6ee3e83d862d6",
+  "scope": "Same-host loopback; isolated local DERP bootstrap. Actual tunnel path unclassified. Not a WAN benchmark.",
+  "approval": "Both real APIs compare matching codes before approval; polling latency included.",
+  "tailcat_version": "v0.7.0",
+  "trials": [
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": true,
+      "bytes": 33554432,
+      "staging_s": 0.016071457999999983,
+      "connect_and_consent_s": 0.05681154200000005,
+      "transfer_s": 0.107817416,
+      "end_to_end_s": 0.18070041600000003,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": true,
+      "bytes": 33554432,
+      "staging_s": 0.01253408300000003,
+      "connect_and_consent_s": 0.05533937499999997,
+      "transfer_s": 0.37257754200000004,
+      "end_to_end_s": 0.44045100000000004,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.011169707999999945,
+      "connect_and_consent_s": 0.05562808400000008,
+      "transfer_s": 0.36712695799999995,
+      "end_to_end_s": 0.43392474999999997,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.01032279199999997,
+      "connect_and_consent_s": 0.05416633300000018,
+      "transfer_s": 0.11182779199999993,
+      "end_to_end_s": 0.17631691700000007,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.011470749999999974,
+      "connect_and_consent_s": 0.05626729099999994,
+      "transfer_s": 0.10757012500000007,
+      "end_to_end_s": 0.175308166,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010356625000000008,
+      "connect_and_consent_s": 0.05615545799999988,
+      "transfer_s": 0.36090350000000004,
+      "end_to_end_s": 0.42741558299999993,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010965000000000114,
+      "connect_and_consent_s": 0.05608070900000017,
+      "transfer_s": 0.36404445799999996,
+      "end_to_end_s": 0.43109016700000025,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010617167000000372,
+      "connect_and_consent_s": 0.05503204099999959,
+      "transfer_s": 0.11160925000000033,
+      "end_to_end_s": 0.17725845800000029,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010712708000000237,
+      "connect_and_consent_s": 0.056129166999999924,
+      "transfer_s": 0.106738,
+      "end_to_end_s": 0.17357987500000016,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010713874999999984,
+      "connect_and_consent_s": 0.0566063330000004,
+      "transfer_s": 0.36607191699999975,
+      "end_to_end_s": 0.43339212500000013,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010662084000000238,
+      "connect_and_consent_s": 0.05613874999999968,
+      "transfer_s": 0.3782710410000001,
+      "end_to_end_s": 0.445071875,
+      "verified": true
+    },
+    {
+      "dataset": "large",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 33554432,
+      "staging_s": 0.010728791000000015,
+      "connect_and_consent_s": 0.05606041699999986,
+      "transfer_s": 0.10827720800000007,
+      "end_to_end_s": 0.17506641599999995,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": true,
+      "bytes": 2048000,
+      "staging_s": 0.12271579199999927,
+      "connect_and_consent_s": 0.05329662500000065,
+      "transfer_s": 0.10709750000000007,
+      "end_to_end_s": 0.283109917,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": true,
+      "bytes": 2048000,
+      "staging_s": 0.1251680000000004,
+      "connect_and_consent_s": 0.05416316699999957,
+      "transfer_s": 0.11120004200000011,
+      "end_to_end_s": 0.29053120900000007,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.12573116699999964,
+      "connect_and_consent_s": 0.05578183300000017,
+      "transfer_s": 0.11027833300000012,
+      "end_to_end_s": 0.29179133299999993,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.12929512499999962,
+      "connect_and_consent_s": 0.05214133299999979,
+      "transfer_s": 0.11121512500000019,
+      "end_to_end_s": 0.2926515829999996,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.12862783300000036,
+      "connect_and_consent_s": 0.05578179199999944,
+      "transfer_s": 0.11025624999999994,
+      "end_to_end_s": 0.29466587499999974,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.13065462500000002,
+      "connect_and_consent_s": 0.055897415999999644,
+      "transfer_s": 0.11035479200000076,
+      "end_to_end_s": 0.2969068330000004,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.12681883299999974,
+      "connect_and_consent_s": 0.05262066700000023,
+      "transfer_s": 0.11142074999999974,
+      "end_to_end_s": 0.2908602499999997,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.1269976660000003,
+      "connect_and_consent_s": 0.0539250839999994,
+      "transfer_s": 0.11049150000000019,
+      "end_to_end_s": 0.2914142499999999,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.13217483300000055,
+      "connect_and_consent_s": 0.05584191699999952,
+      "transfer_s": 0.11169895799999985,
+      "end_to_end_s": 0.2997157079999999,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.12894641699999987,
+      "connect_and_consent_s": 0.05602062500000038,
+      "transfer_s": 0.11140008299999948,
+      "end_to_end_s": 0.29636712499999973,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "tailcat",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.13219966700000008,
+      "connect_and_consent_s": 0.055085832999999695,
+      "transfer_s": 0.10929837499999984,
+      "end_to_end_s": 0.2965838749999996,
+      "verified": true
+    },
+    {
+      "dataset": "small",
+      "mode": "nearby",
+      "warmup": false,
+      "bytes": 2048000,
+      "staging_s": 0.1319333330000001,
+      "connect_and_consent_s": 0.05588012499999895,
+      "transfer_s": 0.11134783400000003,
+      "end_to_end_s": 0.2991612919999991,
+      "verified": true
+    }
+  ],
+  "tailcat_listener_startup_s": 0.056083042,
+  "medians": {
+    "large": {
+      "nearby": {
+        "staging_s": 0.010712708000000237,
+        "connect_and_consent_s": 0.05606041699999986,
+        "transfer_s": 0.10827720800000007,
+        "end_to_end_s": 0.175308166
+      },
+      "tailcat": {
+        "staging_s": 0.010713874999999984,
+        "connect_and_consent_s": 0.05613874999999968,
+        "transfer_s": 0.36607191699999975,
+        "end_to_end_s": 0.43339212500000013
+      }
+    },
+    "small": {
+      "nearby": {
+        "staging_s": 0.12929512499999962,
+        "connect_and_consent_s": 0.05578179199999944,
+        "transfer_s": 0.11121512500000019,
+        "end_to_end_s": 0.29466587499999974
+      },
+      "tailcat": {
+        "staging_s": 0.12894641699999987,
+        "connect_and_consent_s": 0.05578183300000017,
+        "transfer_s": 0.11035479200000076,
+        "end_to_end_s": 0.29636712499999973
+      }
+    }
+  }
+}

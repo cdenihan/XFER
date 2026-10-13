@@ -8,6 +8,8 @@ const transfer = @import("transfer.zig");
 const discovery = @import("discovery.zig");
 const wire = @import("wire.zig");
 const net_io = @import("net_io.zig");
+const tailcat = @import("tailcat.zig");
+const ui_http = @import("ui_http.zig");
 const Reporter = @import("reporter.zig").Reporter;
 pub const Settings = struct { port: u16 = 9000, bind: []const u8 = "0.0.0.0", output: []const u8, name: []const u8, max_bytes: u64 = 16 * 1024 * 1024 * 1024, open_browser: bool = true, json: bool = false };
 const Peer = struct { name: []const u8, address: []const u8 };
@@ -34,6 +36,14 @@ const State = struct {
     instance: [16]u8,
     shared_secret: []const u8,
     host: []const u8,
+    tailcat_executable: []const u8,
+    tailcat_available: bool,
+    remote_active: bool = false,
+    remote_enabled: bool = false,
+    remote_stop: Io.Event = .unset,
+    remote_invite: [2100]u8 = undefined,
+    remote_invite_len: usize = 0,
+    remote_error: []const u8 = "",
     mutex: Io.Mutex = .init,
     workers: Io.Group = .init,
     stop: Io.Event = .unset,
@@ -142,7 +152,8 @@ pub fn run(init: std.process.Init, settings: Settings) !void {
     const url = try std.fmt.allocPrint(a, "http://{s}/#{s}", .{ host, token });
     const shared = init.environ_map.get("XFER_TOKEN") orelse "";
     if (shared.len != 0 and (shared.len < 16 or shared.len > 1024)) return error.InvalidSharedSecret;
-    var state: State = .{ .io = io, .gpa = init.gpa, .settings = settings, .output = output, .tmp = init.environ_map.get("TMPDIR") orelse init.environ_map.get("TEMP") orelse init.environ_map.get("TMP") orelse if (@import("builtin").os.tag == .windows) "." else "/tmp", .token = token, .instance = instance, .shared_secret = shared, .host = host, .peer_arena = .init(init.gpa) };
+    const tailcat_executable = init.environ_map.get("XFER_TAILCAT_BIN") orelse "tailcat";
+    var state: State = .{ .io = io, .gpa = init.gpa, .settings = settings, .output = output, .tmp = init.environ_map.get("TMPDIR") orelse init.environ_map.get("TEMP") orelse init.environ_map.get("TMP") orelse if (@import("builtin").os.tag == .windows) "." else "/tmp", .token = token, .instance = instance, .shared_secret = shared, .host = host, .tailcat_executable = tailcat_executable, .tailcat_available = tailcat.available(a, io, tailcat_executable), .peer_arena = .init(init.gpa) };
     state.setMessage("ready", "Choose files and a nearby computer");
     defer state.peer_arena.deinit();
     var udp: ?Io.net.Socket = null;
@@ -278,7 +289,16 @@ fn sendJobInner(s: *State, upload: *Upload, host: []const u8) !void {
     const plan = try manifest.plan(a, s.io, path);
     defer plan.close(s.io);
     try s.options().reporter.event("connecting", "Connecting to the selected computer…", 0, plan.offer.total);
-    const stream = try transfer.connect(s.io, host, s.settings.port);
+    var tunnel: ?std.process.Child = null;
+    defer if (tunnel) |*child| child.kill(s.io);
+    var destination = host;
+    if (std.mem.startsWith(u8, host, "xfer-tailcat:")) {
+        if (!s.tailcat_available) return error.TailcatNotInstalled;
+        const forwarded = try tailcat.forward(a, s.io, s.tailcat_executable, host);
+        tunnel = forwarded.child;
+        destination = forwarded.endpoint;
+    }
+    const stream = try transfer.connect(s.io, destination, s.settings.port);
     defer stream.close(s.io);
     try s.mutex.lock(s.io);
     if (s.canceled) {
@@ -479,23 +499,8 @@ fn httpInner(s: *State, stream: Io.net.Stream, control: *HttpControl) !void {
         const expected = try std.fmt.allocPrint(a, "http://{s}", .{s.host});
         if (!std.mem.eql(u8, expected, value)) return reply(&request, .forbidden, "{\"error\":\"Invalid origin\"}");
     }
-    if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/")) {
-        return request.respond(@embedFile("ui/index.html"), .{ .keep_alive = false, .extra_headers = &.{
-            .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-            .{ .name = "Cache-Control", .value = "no-store" },
-            .{ .name = "Content-Security-Policy", .value = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" },
-            .{ .name = "Referrer-Policy", .value = "no-referrer" },
-        } });
-    }
-    if (request.head.method == .GET) {
-        const asset: ?struct { body: []const u8, content_type: []const u8 } =
-            if (std.mem.eql(u8, request.head.target, "/app.js")) .{ .body = @embedFile("ui/app.js"), .content_type = "text/javascript; charset=utf-8" } else if (std.mem.eql(u8, request.head.target, "/style.css")) .{ .body = @embedFile("ui/style.css"), .content_type = "text/css; charset=utf-8" } else null;
-        if (asset) |value| return request.respond(value.body, .{ .keep_alive = false, .extra_headers = &.{
-            .{ .name = "Content-Type", .value = value.content_type },
-            .{ .name = "Cache-Control", .value = "no-store" },
-            .{ .name = "X-Content-Type-Options", .value = "nosniff" },
-        } });
-    }
+    if (try ui_http.respond(a, &request)) return;
+    if ((request.head.method == .GET or request.head.method == .HEAD) and !std.mem.startsWith(u8, request.head.target, "/api/")) return request.respond("Not found", .{ .status = .not_found, .keep_alive = false });
     const expected = try std.fmt.allocPrint(a, "Bearer {s}", .{s.token});
     if (authorization == null or !std.mem.eql(u8, authorization.?, expected)) return reply(&request, .unauthorized, "{\"error\":\"Launch XFER to open this window\"}");
     route(s, a, &request, upload_path, control) catch |err| {
@@ -518,12 +523,35 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
         const body = blk: {
             try s.mutex.lock(s.io);
             defer s.mutex.unlock(s.io);
-            break :blk try std.json.Stringify.valueAlloc(a, .{ .name = s.settings.name, .output = s.settings.output, .busy = s.busy, .phase = s.phase, .message = s.message[0..s.message_len], .bytes = s.bytes, .total = s.total, .pending = s.pending, .peers = s.peers }, .{});
+            break :blk try std.json.Stringify.valueAlloc(a, .{ .name = s.settings.name, .output = s.settings.output, .busy = s.busy, .phase = s.phase, .message = s.message[0..s.message_len], .bytes = s.bytes, .total = s.total, .pending = s.pending, .peers = s.peers, .tailcat = .{ .available = s.tailcat_available, .active = s.remote_active, .enabled = s.remote_enabled, .invite = s.remote_invite[0..s.remote_invite_len], .@"error" = s.remote_error } }, .{});
         };
         return reply(request, .ok, body);
     }
     const expected_method: std.http.Method = if (std.mem.eql(u8, target, "/api/upload")) .PUT else .POST;
     if (request.head.method != expected_method) return reply(request, .method_not_allowed, "{}");
+    if (std.mem.eql(u8, target, "/api/tailcat/start")) {
+        {
+            try s.mutex.lock(s.io);
+            defer s.mutex.unlock(s.io);
+            if (!s.tailcat_available) return error.TailcatNotInstalled;
+            if (s.remote_active) return error.TailcatAlreadyRunning;
+            if (!std.mem.eql(u8, s.settings.bind, "0.0.0.0") and !std.mem.eql(u8, s.settings.bind, "127.0.0.1")) return error.TailcatRequiresLoopbackListener;
+            s.remote_stop.reset();
+            s.remote_error = "";
+            s.remote_active = true;
+            errdefer s.remote_active = false;
+            try s.workers.concurrent(s.io, remoteJob, .{s});
+        }
+        return reply(request, .ok, "{}");
+    }
+    if (std.mem.eql(u8, target, "/api/tailcat/stop")) {
+        try s.mutex.lock(s.io);
+        s.remote_enabled = false;
+        s.remote_invite_len = 0;
+        s.mutex.unlock(s.io);
+        s.remote_stop.set(s.io);
+        return reply(request, .ok, "{}");
+    }
     if (std.mem.eql(u8, target, "/api/decision")) {
         const body = try jsonBody(struct { id: u64, approve: bool, code: []const u8 }, a, request);
         defer body.deinit();
@@ -619,12 +647,17 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
     if (std.mem.eql(u8, target, "/api/send")) {
         const body = try jsonBody(struct { to: []const u8 }, a, request);
         defer body.deinit();
-        if (body.value.to.len == 0 or body.value.to.len > 512) return error.InvalidAddress;
+        const remote = std.mem.startsWith(u8, body.value.to, "xfer-tailcat:");
+        if (body.value.to.len == 0 or body.value.to.len > (if (remote) @as(usize, 2100) else 512)) return error.InvalidAddress;
         {
             try s.mutex.lock(s.io);
             defer s.mutex.unlock(s.io);
             const upload = s.upload orelse return error.NoSelectedFiles;
             if (upload.in_use or upload.canceled) return error.TransferInProgress;
+            if (std.mem.startsWith(u8, body.value.to, "xfer-tailcat:")) {
+                _ = try tailcat.parseInvite(body.value.to);
+                if (!s.tailcat_available) return error.TailcatNotInstalled;
+            }
             const host = try upload.arena.allocator().dupe(u8, body.value.to);
             try s.workers.concurrent(s.io, sendJob, .{ s, upload, host });
             s.upload = null;
@@ -634,6 +667,12 @@ fn route(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, pat
     return reply(request, .not_found, "{}");
 }
 fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, control: *HttpControl) !void {
+    try stageFile(s, a, request, encoded, control);
+    // Close file handles and release upload ownership before acknowledging it.
+    // A client may send the next upload or start the transfer immediately.
+    try reply(request, .ok, "{}");
+}
+fn stageFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request, encoded: []const u8, control: *HttpControl) !void {
     const path = try decodePath(a, encoded);
     try paths.validate(path);
     const size = request.head.content_length orelse return error.LengthRequired;
@@ -698,7 +737,6 @@ fn uploadFile(s: *State, a: std.mem.Allocator, request: *std.http.Server.Request
     upload.count += 1;
     s.mutex.unlock(s.io);
     succeeded = true;
-    try reply(request, .ok, "{}");
 }
 // The private selection has no symlinks. Count each distinct directory once,
 // including ancestors implied by file-picker paths, before consuming a body.
@@ -771,4 +809,39 @@ test "upload progress extends idle timeout and explicit abort still wakes it" {
     try std.testing.expect(control.idle_deadline.durationFromNow(io).raw.nanoseconds > 0);
     control.abort.set(io);
     try control.wait(io);
+}
+
+fn remoteJob(s: *State) void {
+    const result = remoteJobInner(s);
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    s.remote_active = false;
+    s.remote_enabled = false;
+    s.remote_invite_len = 0;
+    if (result) |_| {} else |err| {
+        if (err != error.Canceled) s.remote_error = "TailcatStartupFailed";
+    }
+}
+fn remoteJobInner(s: *State) !void {
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    var helper = try tailcat.server(arena.allocator(), s.io, s.tailcat_executable, s.settings.port);
+    defer helper.child.kill(s.io);
+    try s.mutex.lock(s.io);
+    if (!s.remote_stop.isSet()) {
+        @memcpy(s.remote_invite[0..helper.invite.len], helper.invite);
+        s.remote_invite_len = helper.invite.len;
+        s.remote_enabled = true;
+    }
+    s.mutex.unlock(s.io);
+    const Result = union(enum) { exited: anyerror!void, stopped: Io.Cancelable!void };
+    var results: [2]Result = undefined;
+    var select = Io.Select(Result).init(s.io, &results);
+    defer select.cancelDiscard();
+    try select.concurrent(.exited, tailcat.waitForExit, .{ s.io, helper.child.stdout.? });
+    try select.concurrent(.stopped, Io.Event.wait, .{ &s.remote_stop, s.io });
+    switch (try select.await()) {
+        .exited => return error.TailcatExited,
+        .stopped => {},
+    }
 }

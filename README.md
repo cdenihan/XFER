@@ -1,24 +1,45 @@
 # XFER
 
-Nearby file sharing for Windows, macOS, and Linux, written in **Zig 0.17.0**.
+Nearby file sharing for Windows, macOS, and Linux, with a **Zig 0.17.0** native engine and a **TypeScript** browser UI.
 Open XFER on two computers, choose a nearby receiver, compare the code, and send
-a file or folder. No accounts, cloud, server deployment, or runtime packages.
+a file or folder. Nearby sharing requires no accounts, cloud, server deployment, or runtime packages.
 
-XFER uses the same local network (Wi-Fi or Ethernet). Launching it opens a
+Nearby sharing uses the same local network (Wi-Fi or Ethernet). The optional
+**Across a distance** transport uses an installed [Tailcat helper](docs/TAILCAT.md)
+on both computers. Launching it opens a
 browser sharing window; the same executable also provides a scriptable CLI. It does not speak Apple's AirDrop
 protocol or establish Bluetooth/AWDL/Wi-Fi Direct connections.
 
 ## Build
 
-Install [Zig 0.17.0](https://ziglang.org/download/) and run:
+Install [Zig 0.17.0](https://ziglang.org/download/) and [Bun 1.4.2](https://bun.sh/), then run:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ```
 
-The executable is `zig-out/bin/xfer` (`xfer.exe` on Windows). The application
-uses only Zig's standard library. Language and I/O APIs follow the
+The executable is `zig-out/bin/xfer` (`xfer.exe` on Windows). The build uses Bun to install locked frontend dependencies and run Vite+, then
+compiles the generated HTML, JavaScript, CSS and icons directly into the Zig
+executable. Releases contain **one executable**: no Bun runtime, native addon,
+bundled helper binary or extracted UI assets. Optional remote sharing uses a
+separately installed Tailcat helper. The native engine uses only Zig's standard
+library. Language and I/O APIs follow the
 [0.17.0 documentation](https://ziglang.org/documentation/0.17.0/).
+
+## Develop the UI
+
+The frontend is React and TypeScript, with **Vite+**, **TanStack Router** and
+**TanStack Query**, run by **Bun**. Zig owns discovery, encryption, file I/O,
+and the authenticated local API. The built UI is embedded in the native app.
+
+```sh
+cd web
+bun install --frozen-lockfile
+bun run dev
+```
+
+This starts both Zig and the Vite+ development server and prints a ready-to-use
+URL. See [development](docs/DEVELOPMENT.md) for checks and the separate proxy workflow.
 
 ## Share
 
@@ -147,10 +168,12 @@ unencrypted mode. Exit status is 0 on success and 1 on failure.
 
 ```sh
 zig fmt --check build.zig src
+(cd web && bun install --frozen-lockfile && bun run check && bun run test)
 zig build test
 zig build -Doptimize=ReleaseSafe
 python3 tests/integration.py zig-out/bin/xfer
 python3 tests/desktop.py zig-out/bin/xfer
+python3 tests/standalone.py zig-out/bin/xfer
 ```
 
 On Windows use `python tests/integration.py zig-out/bin/xfer.exe`.
@@ -191,3 +214,13 @@ atomic visibility, not a guarantee against every filesystem/power-loss scenario.
 
 See [SECURITY.md](SECURITY.md) for trust assumptions and reporting.
 The measured Rust/Zig LAN comparison is in [benchmarks](benchmarks/README.md).
+
+## Frontend architecture
+
+`web/` uses Vite+ **1.1.0**, React, TypeScript, TanStack Router
+and TanStack Query. Bun **1.4.2** runs development and build tooling. Zig serves
+the compressed embedded assets and authenticated API and handles native file transfers.
+The UI is a binary asset pack compiled into read-only storage with `@embedFile`;
+no asset files or JavaScript runtime are extracted or needed at launch.
+See [development](docs/DEVELOPMENT.md) for the authenticated development proxy
+and frontend verification commands.

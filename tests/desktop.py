@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Exercise the loopback browser API against real encrypted transfer processes."""
+import gzip
 import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -100,8 +102,37 @@ def run():
         receiver = Desktop(root / 'receiver', 'Receiver')
         try:
             page, headers = sender.request('/', method='GET')
-            assert b'Drop files or a folder here' in page
-            assert b'webkitdirectory' in page
+            built_ui = Path(__file__).resolve().parent.parent / 'web' / 'dist'
+            assert page == (built_ui / 'index.html').read_bytes(), 'Embedded UI is stale'
+            assert b'id="root"' in page
+            route_page, _ = sender.request('/receive', method='GET')
+            assert route_page == page, 'Receive route must reload the SPA'
+            for asset in re.findall(rb'(?:src|href)="(/assets/[^\"]+)"', page):
+                data, asset_headers = sender.request(asset.decode(), method='GET')
+                assert data, 'Embedded asset is empty'
+                assert data == (built_ui / asset.decode().lstrip('/')).read_bytes(), 'Embedded asset differs from the Vite+ build'
+                content_type = dict(asset_headers)['Content-Type']
+                assert ('javascript' in content_type if asset.endswith(b'.js') else 'text/css' in content_type), content_type
+            compressed, compressed_headers = sender.request('/', method='GET', headers={'Accept-Encoding': 'gzip'})
+            assert dict(compressed_headers)['Content-Encoding'] == 'gzip'
+            assert gzip.decompress(compressed) == page
+            etag = dict(compressed_headers)['ETag']
+            empty, cache_headers = sender.request('/', method='GET', headers={'Accept-Encoding': 'gzip', 'If-None-Match': etag}, status=304)
+            assert empty == b'' and dict(cache_headers)['Vary'] == 'Accept-Encoding'
+            plain, plain_headers = sender.request('/', method='GET', headers={'Accept-Encoding': 'gzip;q=0, identity;q=1'})
+            assert plain == page and 'Content-Encoding' not in dict(plain_headers)
+            sender.request('/', method='GET', headers={'Accept-Encoding': '*;q=0'}, status=406)
+            for asset in re.findall(rb'(?:src|href)="(/assets/[^\"]+)"', page):
+                raw, raw_headers = sender.request(asset.decode(), method='GET')
+                zipped, zipped_headers = sender.request(asset.decode(), method='GET', headers={'Accept-Encoding': 'gzip'})
+                assert gzip.decompress(zipped) == raw
+                assert len(zipped) < len(raw)
+                assert 'immutable' in dict(zipped_headers)['Cache-Control']
+                body, head_headers = sender.request(asset.decode(), method='HEAD', headers={'Accept-Encoding': 'gzip'})
+                assert body == b'' and int(dict(head_headers)['content-length']) == len(zipped)
+            sender.request('/receive?view=incoming', method='GET')
+            print('PASS compressed embedded assets, identity fallback, ETags, immutable caching and HEAD')
+            sender.request('/missing', method='GET', status=404)
             assert "frame-ancestors 'none'" in dict(headers)['Content-Security-Policy']
             sender.request('/api/state', method='GET', headers={'Authorization': 'Bearer wrong'}, status=401)
             sender.request('/api/state', method='GET', headers={'Origin': 'https://malicious.example'}, status=403)

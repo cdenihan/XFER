@@ -67,7 +67,7 @@ does not open, execute or scan received files.
 
 ## Browser control surface
 
-The browser server binds only to `127.0.0.1` on a random port, separate from the
+The Zig browser server binds only to `127.0.0.1` on a random port, separate from the
 LAN transfer listener. A fresh 256-bit capability starts in the launch URL's
 fragment, is removed from the address bar, and is retained in same-origin
 sessionStorage for reloads. Every API request requires its bearer header. Exact
@@ -118,3 +118,13 @@ every filesystem. Received metadata/permissions are not reproduced.
 This is a new protocol implementation, not an independently audited product.
 The automated tests verify concrete failure cases; they do not prove the
 absence of vulnerabilities.
+
+## Optional Tailcat transport
+
+Remote invitations are bearer capabilities. Share them privately and stop remote
+receiving after use. Tailcat exposes only the native transfer listener; XFER
+keeps its authenticated browser control server on loopback. Both peers still
+compare and approve the XFER verification code, and native hash validation and
+atomic publication remain in effect. The helper is an independently installed
+trusted executable, selected through PATH or `XFER_TAILCAT_BIN`. See
+[remote transport details](docs/TAILCAT.md) for its network and lifecycle scope.
