@@ -12,7 +12,7 @@ protocol or establish Bluetooth/AWDL/Wi-Fi Direct connections.
 
 ## Build
 
-Install [Zig 0.17.0](https://ziglang.org/download/) and [Bun 1.4.2](https://bun.sh/), then run:
+Install [Zig 0.17.0](https://ziglang.org/download/) and [Bun](https://bun.sh/), then run:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -218,7 +218,7 @@ The measured Rust/Zig LAN comparison is in [benchmarks](benchmarks/README.md).
 ## Frontend architecture
 
 `web/` uses Vite+ **1.1.0**, React, TypeScript, TanStack Router
-and TanStack Query. Bun **1.4.2** runs development and build tooling. Zig serves
+and TanStack Query. Bun runs development and build tooling. Zig serves
 the compressed embedded assets and authenticated API and handles native file transfers.
 The UI is a binary asset pack compiled into read-only storage with `@embedFile`;
 no asset files or JavaScript runtime are extracted or needed at launch.
