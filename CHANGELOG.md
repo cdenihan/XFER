@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.2 — UI rebuild and Tailcat sharing
+
+- Rebuild the TanStack browser UI and embed the compressed assets in the binary.
+- Add optional Tailcat sharing support.
+- Update Bun and clarify the README content.
+
 ## 2.0.1 — Windows browser response fix
 
 - Preserve HTTP error responses when rejected upload bytes arrive during socket
